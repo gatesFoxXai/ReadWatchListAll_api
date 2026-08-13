@@ -1,0 +1,593 @@
+### 語音合成（Text‑to‑Speech，TTS）工具概覽
+
+| 目的 | 方案 | 特點 | 取得方式 |
+|------|------|------|-----------|
+| **線上即時合成** | **Google Cloud Text‑to‑Speech** | 100+ 語言、各種語音品質、可自訂音調 |
+<https://cloud.google.com/text-to-speech> |
+|  | **Amazon Polly** | 60+ 語言，語速/音高可調整 | <https://aws.amazon.com/polly/> |
+|  | **Microsoft Azure Speech** | 多平台 SDK、語音辨識+合成 |
+<https://azure.microsoft.com/services/cognitive-services/speech-services/> |
+|  | **IBM Watson TTS** | 自訂音色、情緒控制 | <https://www.ibm.com/cloud/watson-text-to-speech> |
+| **免費/開源線上** | **Google 翻譯**（Web版） | 只需粘貼文字即可聽取 | <https://translate.google.com/> |
+|  | **Mozilla TTS (TTS)** | 開源 Python 程式庫，支持多語言 | <https://github.com/mozilla/TTS> |
+|  | **Coqui TTS** | Mozilla TTS 的衍生版本，較易上手 | <https://github.com/coqui-ai/TTS> |
+| **離線桌面** | **Balabolka**（Windows） | 支持多種 TTS 引擎（SAPI、Voice Reader等） |
+<https://www.cross-plus-a.com/balabolka.htm> |
+|  | **eSpeak NG**（Windows / Linux / macOS） | 輕量級、免費、支持多語言 |
+<https://github.com/espeak-ng/espeak-ng> |
+|  | **Festival**（Linux） | 功能齊全的語音合成系統 | 通常已內建於 Ubuntu（`sudo apt install festival`） |
+|  | **NVDA**（Windows） | 無障礙軟體，同時可作為 TTS 引擎 | <https://www.nvaccess.org/> |
+| **手機** | **iOS VoiceOver** / **Android TalkBack** | 內建語音合成，支持多語言 | 內建於作業系統 |
+|  | **Google Text‑to‑Speech**（Android） | 可在 Play Store 下載 |
+<https://play.google.com/store/apps/details?id=com.google.android.tts> |
+|  | **Apple Speech Synthesis**（iOS） | 內建於 iOS，支持多種語音 | 內建 |
+
+---
+
+## 如何選擇 & 取得工具
+
+| 需求 | 推薦方案 | 取得方式 |
+|------|----------|-----------|
+| **即時網頁合成** | Google Cloud, Amazon Polly, Azure Speech | 先註冊相應雲帳號，取得 API 金鑰 |
+| **免費且可自行部署** | Mozilla TTS / Coqui TTS | 下載 GitHub 專案，依照 README 安裝 Python 環境 |
+| **Windows 桌面** | Balabolka + SAPI5 語音 | 下載安裝程式，或使用 Windows 內建 SAPI5 語音 |
+| **Linux 桌面** | Festival 或 espeak-ng | `sudo apt install festival` 或 `sudo apt install espeak-ng` |
+| **手機語音閱讀** | Google TTS / iOS VoiceOver | 直接使用手機內建功能 |
+
+---
+
+## 範例：使用 Python + Google Cloud TTS
+
+```bash
+# 1. 安裝依賴
+pip install google-cloud-texttospeech
+
+# 2. 下載服務帳戶金鑰並設置環境變數
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/key.json"
+```
+
+```python
+from google.cloud import texttospeech
+
+def synthesize_text(text, output_file="output.mp3"):
+    client = texttospeech.TextToSpeechClient()
+
+    # 設定輸入文字
+    synthesis_input = texttospeech.SynthesisInput(text=text)
+
+    # 選擇語音語言與聲音 (此例為英語美式)
+    voice = texttospeech.VoiceSelectionParams(
+        language_code="en-US",
+        ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL,
+    )
+
+    # 設定音頻格式
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3
+    )
+
+    # 進行合成
+    response = client.synthesize_speech(
+        input=synthesis_input,
+        voice=voice,
+        audio_config=audio_config,
+    )
+
+    # 儲存檔案
+    with open(output_file, "wb") as out:
+        out.write(response.audio_content)
+    print(f"已儲存為 {output_file}")
+
+# 測試
+synthesize_text("Hello, world!")
+```
+
+---
+
+## 範例：使用 Balabolka (Windows)
+
+1. 下載安裝包：<https://www.cross-plus-a.com/balabolka.htm>
+2. 安裝後打開軟體，將文字貼到輸入框。
+3. 選擇「語音」>「選擇語音」，挑選 SAPI5 語音。
+4. 按「播放」即可聽到語音。
+5. 若想離線儲存，可在「工具」>「將文字轉換成音檔」輸出 MP3。
+
+---
+
+## 範例：使用 eSpeak NG (Linux)
+
+```bash
+sudo apt install espeak-ng
+# 合成並播放
+espeak-ng "這是一段中文測試。"
+
+# 儲存為 WAV
+espeak-ng -w test.wav "這是一段中文測試。"
+```
+
+---
+
+## 如何提升 TTS 音質
+
+| 方向 | 建議 |
+|------|------|
+| **語音樣本數量** | 使用高品質錄音（16kHz 16-bit） |
+| **語音模型** | 選擇「Neural」或「WaveNet」等高階模型（Google, Azure, AWS） |
+| **語速 & 音高** | 大多數雲端 API 允許自訂 `speakingRate`、`pitch` |
+| **自訂聲音** | 部分平台支持「自訂音色」或「情緒」參數（Azure Speech） |
+| **多語言/多方言** | 若需多語言，可切換 `languageCode` 或使用不同模型 |
+
+---
+
+### 小結
+
+- **線上 API**（Google Cloud, AWS, Azure, IBM）: 付費但音質最佳，適合需要高品質、可擴充的應用。
+- **免費/開源**（Mozilla TTS, Coqui TTS, eSpeak NG, Festival）: 需要自行部署，適合開發者或資源有限的專案。
+- **桌面工具**（Balabolka, NVDA）: 適合 Windows 使用者，無需程式設置。
+- **手機**（iOS VoiceOver, Android TalkBack, Google TTS）: 內建於作業系統，使用方便
+
+先確認「mcp」與「agent」指的是什麼，因為這兩個詞在不同領域會有不同的意義。以下提供兩種常見解讀，您可以先對照一下，
+再告訴我哪一種（或是其他）最符合您的需求，這樣我才能給您最貼切的步驟。
+
+---
+
+## 1️⃣  可能是「OpenAI Agent」(自動化助手) + 「MCP」＝「Microsoft Cloud Platform」/「Azure」
+
+| 需求 | 方案 | 主要步驟 |
+|------|------|-----------|
+| 在 Windows (WSL) 上跑一個「agent」去呼叫 Azure OpenAI | 1. 先把 Azure OpenAI 設定好。<br>2. 在 WSL 裡安裝
+`azure-identity` & `azure-ai-openai`。<br>3. 寫一個簡單的 Python 或 Node.js agent，使用 Azure SDK 取得 token 再呼叫
+模型。 | 1️⃣ 建立 Azure 訂閱、資源組、OpenAI 資源。<br>2️⃣ 產生 **Key** 或 **Managed Identity**。<br>3️⃣ WSL 內安裝
+相依套件。<br>4️⃣ 寫程式碼。<br>5️⃣ 執行 agent。 |
+
+### 具體範例（Python）
+
+```bash
+# WSL terminal
+sudo apt update && sudo apt install -y python3-venv python3-pip
+python3 -m venv venv
+source venv/bin/activate
+pip install azure-identity azure-ai-openai
+```
+
+```python
+# agent.py
+import os
+from azure.identity import DefaultAzureCredential
+from azure.ai.openai import OpenAIClient
+
+# 1️⃣ 先在 Azure portal 產生「Azure OpenAI」資源，取得 endpoint 與 key
+endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+deployment_name = "gpt-35-turbo"  # 你部署的模型名稱
+
+client = OpenAIClient(endpoint=endpoint, credential=DefaultAzureCredential())
+
+def ask(question: str):
+    response = client.chat.completions.create(
+        model=deployment_name,
+        messages=[{"role": "user", "content": question}],
+    )
+    return response.choices[0].message.content
+
+if __name__ == "__main__":
+    print(ask("你好，今天的天氣如何？"))
+```
+
+> **重點**
+> 1. `AZURE_OPENAI_ENDPOINT` 必須指向您在 Azure portal 裡看到的「Endpoint」。
+> 2. `DefaultAzureCredential` 會自動搜尋環境變數、Managed Identity、Azure CLI 登入等方式取得 token；如果您在本機開發
+，只需把 `key` 設定成環境變數即可：
+> ```bash
+> export AZURE_OPENAI_KEY="your_key_here"
+> ```
+> 3. 若要直接使用 API Key，改用 `AzureKeyCredential`：
+
+```python
+from azure.core.credentials import AzureKeyCredential
+client = OpenAIClient(endpoint=endpoint, credential=AzureKeyCredential(os.getenv("AZURE_OPENAI_KEY")))
+```
+
+---
+
+## 2️⃣ 「MCP」＝「Microsoft Copilot Platform」或「Mac Mini Control Protocol」＋「Agent」＝「自動化腳本」
+
+| 需求 | 方案 | 主要步驟 |
+|------|------|-----------|
+| 在 Windows / WSL 上透過「agent」遠端控制另一台機器（例如 Mac Mini） | 1. 安裝 `ssh` 與 `OpenSSH Server`（若是
+Mac Mini）。<br>2. 在 WSL 裡寫一個「agent」腳本，使用 `paramiko` 或 `fabric` 來 SSH、執行指令。<br>3. 若想把
+ChatGPT 的回覆轉成指令，可把 GPT 模型作為「意圖辨識」層。 | 1️⃣ 讓 Mac Mini 允許 SSH。<br>2️⃣ 在 WSL 裡安裝
+`python3-pip`、`paramiko`。<br>3️⃣ 寫一個簡易代理，先讓 GPT 給出指令，再使用 `paramiko` 執行。 |
+
+### 範例（Python + Paramiko）
+
+```bash
+# WSL
+sudo apt install -y python3-venv python3-pip
+python3 -m venv venv
+source venv/bin/activate
+pip install openai paramiko
+```
+
+```python
+# mac_agent.py
+import os
+import openai
+import paramiko
+
+# 1️⃣ OpenAI API Key
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# 2️⃣ SSH 設定
+HOST = "mac-mini.local"
+PORT = 22
+USER = "your_user"
+KEY_FILE = "/path/to/your/id_rsa"  # 或直接輸入密碼
+
+def ask_gpt(question: str) -> str:
+    resp = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[{"role":"user","content":question}],
+    )
+    return resp.choices[0].message.content.strip()
+
+def run_remote(cmd: str):
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(hostname=HOST, port=PORT, username=USER, key_filename=KEY_FILE)
+    stdin, stdout, stderr = client.exec_command(cmd)
+    output = stdout.read().decode()
+    client.close()
+    return output
+
+if __name__ == "__main__":
+    user_query = "請在 mac mini 上重新啟動 nginx。"
+    gpt_response = ask_gpt(user_query)
+    # 假設 GPT 回覆為： "sudo systemctl restart nginx"
+    print(f"GPT 建議的指令：{gpt_response}")
+    print("執行結果：")
+    print(run_remote(gpt_response))
+```
+
+> **安全提示**
+> - **私鑰**不要直接放在程式碼內部，使用環境變數或是 `ssh-agent`。
+> - 如果是多台機器，建議把 SSH 主機 key 存成 dict，或是利用 `fabric` 的 `Connection` 來管理。
+
+---
+
+## 3️⃣  3️⃣  其他可能性
+
+| 需求 | 可能的工具 | 主要步驟 |
+|------|-----------|-----------|
+| 使用「MCP」＝「MCP CLI」(某個開源框架) 並搭配「OpenAI Agent」 | 需要安裝 MCP CLI（例如 `mcp-agent`、`mcp-cli` 等）
+並設置 `OPENAI_API_KEY` 或 `AZURE_OPENAI_*`。<br>使用 MCP 的 `invoke` 或 `call` 命令呼叫 ChatGPT。 | 1️⃣ 找 MCP 官方
+文件安裝。<br>2️⃣ 在 WSL 內部環境變數設好 API Key。<br>3️⃣ 用 MCP 指令跑一個小 demo。 |
+
+> **示例**（假設 MCP 具備 `mcp agent` 子命令）
+> ```bash
+> export OPENAI_API_KEY=xxxx
+> mcp agent run --model=gpt-4o-mini --prompt="請告訴我今天的市場趨勢"
+> ```
+
+> 若 MCP 不是這種意思，請您提供「mcp」的完整名稱或使用上下文，這樣我能直接針對該工具說明安裝與使用方式。
+
+---
+
+## 接下來的步驟
+
+1. **請告訴我**：「mcp」是指哪一項？
+   - ① Azure OpenAI / Microsoft Cloud Platform (若您想在 Azure 上跑 ChatGPT)
+   - ② Microsoft Copilot Platform / 其他遠端控制協定
+   - ③ 其他專案/工具（請說明）
+2. 如果您已經在 WSL 上安裝好所需的 Python 環境，您可以把相應的程式碼直接貼到檔案裡，並使用環境變數存放 API Key 或
+Azure Key。
+3. 若您還沒有安裝任何 SDK 或套件，請先在 WSL 執行對應的 `apt install` 或 `pip install` 指令，確保所有相依套件完整。
+
+
+隨時回覆我「這樣的解讀正確嗎？」或「請以 Azure 方式進行」，我會再把完整的安裝、設定、測試流程寫成一步一步的教學
+- **Codex**（OpenAI Codex）是 2021–2023 年間推出的自動化程式碼生成模型，主要是把自然語言提示轉成程式碼（例如
+Python、JavaScript、Go 等）。
+- 於 2023 年底，OpenAI 逐步把 Codex 從公開 API 轉移到 **ChatGPT‑4** 與 **GPT‑4o**（以及「Turbo」系列）的內部「
+code‑generation」能力中。
+- 這並不代表你「不知道」Codex；我在訓練資料裡包含了 Codex 的技術細節、常見用法、限制等，雖然我的知識截至 2024，但可
+以幫你解釋 Codex 的運作方式與歷史。
+
+---
+
+## 2️⃣ Codex 是否還能用？
+
+| 可能的情況 | 現況 | 可行的替代方案 |
+|-----------|------|---------------|
+| **想直接調用 Codex API** | Codex API 已在 2023‑2024 期間被官方「停用」或「取代」。你無法再從 OpenAI 官方帳號直接取
+得 Codex endpoints。 | 1️⃣ 使用 GPT‑4o 或 GPT‑4 Turbo 的「程式碼生成」能力（如 `gpt-4o-mini`、`gpt-4o`、
+`gpt-4-turbo`）。<br>2️⃣ 若你已經有 Codex 的舊存檔或本地模型，可以自行運行；但這不再是官方支援的路徑。 |
+| **想在現有專案中使用「Codex」類似功能** | 你可以使用 GPT‑4o 或 GPT‑4 Turbo，兩者在程式碼生成方面已經超越 Codex。
+| 直接把你的提示交給 GPT‑4o，使用「code」模式或「json」輸出格式即可。 |
+
+---
+
+## 3️⃣ 如何使用 GPT‑4o 進行程式碼生成？
+
+1. **取得 API Key**（OpenAI 或 Azure）
+   ```bash
+   export OPENAI_API_KEY="your_api_key_here"
+   ```
+2. **簡單範例（Python）**
+
+   ```python
+   import openai
+
+   openai.api_key = os.getenv("OPENAI_API_KEY")
+
+   def generate_code(prompt, language="python"):
+       response = openai.ChatCompletion.create(
+           model="gpt-4o-mini",   # 或 gpt-4o、gpt-4-turbo
+           messages=[{"role": "user", "content": f"寫一段 {language} 程式碼：{prompt}"}],
+           temperature=0.2,
+           max_tokens=512,
+           top_p=1.0,
+       )
+       return response.choices[0].message.content.strip()
+
+   if __name__ == "__main__":
+       code = generate_code("實作一個快速排序函式")
+       print(code)
+   ```
+
+3. **要注意的限制**
+   - **Token 長度**：大規模程式碼可能需要較多 token，請調整 `max_tokens`。
+   - **安全性**：確保不將關鍵密碼或私鑰直接寫入提示或程式碼中。
+   - **輸出檢查**：雖然 GPT‑4o 能產生高質量程式碼，但仍需人為審查，尤其是安全敏感的環境。
+
+---
+
+## 4️⃣ 若你真的想用「舊 Codex」實例
+
+- **本地部署**：如果你已經有一個舊版 Codex 的模型檔（例如 `codex-davinci` 或 `codex-codex`），可以在 Docker 或 GPU
+節點上自行部署。
+- **自訂 API**：使用 Flask 或 FastAPI 來包裝模型，提供 `POST /generate` 接口，接受提示並回傳程式碼。
+- **舊 API 參數**：Codex 的 `prompt` 參數相對簡單，沒有 `ChatCompletion` 那麼複雜；你可以直接傳遞 `prompt` 字串。
+
+> 但要再次強調，OpenAI 官方不再支援 Codex 的 API，若你需要穩定且更新的功能，建議直接使用 GPT‑4o 或 GPT‑4 Turbo。
+
+---
+
+### 總結
+
+- **我確實知道 Codex**：在 2024 前的資料庫中包含它的技術細節、常見用途與限制。
+- **目前建議使用 GPT‑4o／GPT‑4 Turbo**：它們在程式碼生成方面已經超越 Codex，且得到官方持續支援。
+- **若你還想使用 Codex**：只能在舊資料或自建環境中呼叫，官方不再提供直接訪問。
+
+你想先試試 GPT‑4o 的程式碼生成功能，還是要說明舊 Codex 的部署步驟？ 🚀
+基於 OpenAI 的 GPT‑4 架構所訓練的大型語言模型。透過大量文本資料學習，我能理解並生成自然語言，協助回答問題、提供
+建議、撰寫文字、翻譯、程式碼輔助等等。我的知識截至 2024 年 6 月，並且已經被調教以適應多種應用場景。
+
+## GPT‑4 vs GPT‑4o (及 GPT‑4o‑mini)
+
+| 指標 | GPT‑4 (正式版) | GPT‑4o / GPT‑4o‑mini |
+|------|---------------|---------------------|
+| **模型架構** | 基於 **4‑billion‑parameter** “Claude‑style” transformer, 8‑k context window (約 32 k token) | 同樣的 transformer core，但經過**量化、蒸餾、分布式優化**，專為速度與成本優化 |
+| **速度** | **慢**（約 1–2 秒/回應，依照 OpenAI 的“turbo”標準） | **快**（約 0.3–0.5 秒/回應，約 4‑5× faster） |
+| **成本** | **高**（≈ $0.03/1k prompt + $0.06/1k completion） | **低**（≈ $0.003/1k prompt + $0.006/1k completion） |
+| **上下文長度** | 8k tokens | 32k tokens（大多數情況下） |
+| **多模態** | **不支援** | **支援**（文字+影像、音訊輸入） |
+| **程式碼生成** | 可以，但不如 GPT‑4o 專門化 | 專為程式碼生成（尤其是 “quick‑response” 風格）優化，加入了 “best‑practice” 產出 |
+| **可調參** | `temperature`, `top_p`, `max_tokens`, `stop` 等 | 同樣，但多數場景建議 `temperature=0.2–0.3` 以保持可預測性 |
+| **主要使用案例** | 複雜對話、長篇內容生成、深度分析 | 快速原型、程式碼生成、低成本長文本、嵌入式應用 |
+
+> **簡言之**：GPT‑4o 是“更快、更省錢、更長上下文”的 GPT‑4 變體。若你需要大量長文本、影像輸入或高效代碼生成，GPT‑4o（或 GPT‑4o‑mini）會是首選。
+
+---
+
+## Codex：從單獨模型到 GPT‑4o 的「代理」功能
+
+| 版本 | Codex 狀態 | 主要功能 |
+|------|------------|-----------|
+| **Codex (2021‑2023)** | **單一模型**：`codex-davinci`, `codex-codex` 等 | 專為程式碼生成（Python, JavaScript,Go, …） |
+| **GPT‑4 (正式版)** | **無 Codex 代理**（但可產生程式碼） | 可透過 `ChatCompletion` 產生程式碼，但不具備 Codex‑專用的“prompt‑to‑code” API 參數 |
+| **GPT‑4o / GPT‑4o‑mini** | **整合 Codex 能力** | 內建 **code‑generation 模式**：在提示中加上`["role":"user","content":"寫 …"]` 就能直接得到高質量程式碼，且支援多語言、最佳實踐建議 |
+
+### 代理功能說明
+
+- **Codex 代理**：舊 Codex API 允許你直接把自然語言提示交給模型，返回純程式碼（通常以 `text-davinci-002` 為基礎，支援 `prompt` 參數）。
+- **GPT‑4o 的代理**：現在所有「程式碼生成」功能都被整合進 GPT‑4o。你不需要再呼叫一個單獨的 Codex endpoint；只要用GPT‑4o（或 GPT‑4o‑mini）即可得到相同甚至更好的程式碼。
+- **「代理」的意義**：如果你想要把 Codex 的「程式碼生成」行為包裝成一個 API 或服務，最簡單的方法是：
+
+  1. 在你的後端（例如 FastAPI）呼叫 `openai.ChatCompletion`，使用 `model="gpt-4o-mini"`。
+  2. 在提示中加入 **程式碼上下文**（例如說 “請生成一個 Python 函式”），並選擇 `temperature=0.2` 以保持一致性。
+  3. 直接把返回的程式碼送回前端或寫進檔案。
+
+> 這相當於在 GPT‑4o 上搭建一個「Codex‑代理」——它不再是獨立模型，而是 GPT‑4o 自己的內建能力。
+
+---
+
+## 什麼時候選擇 GPT‑4 vs GPT‑4o
+
+| 場景 | 推薦模型 |
+|------|----------|
+| **複雜、長篇對話**（法律、醫學、科研論文等） | GPT‑4 (正式版) 或 GPT‑4‑Turbo |
+| **影像/音訊輸入** | GPT‑4o |
+| **代碼生成**（快速原型、單元測試、自動化腳本） | GPT‑4o‑mini 或 GPT‑4o |
+| **成本敏感、需高吞吐量** | GPT‑4o |
+| **需要 8k 上下文窗口、對話一致性** | GPT‑4 |
+
+---
+
+## 小結
+
+| 問題 | 答案 |
+|------|------|
+| **GPT‑4 與 GPT‑4o 的差異** | GPT‑4o 更快、低成本、32k token 上下文、支援影像/音訊，多模態；GPT‑4 正式版更適合深度、長對話。 |
+| **是否內含 Codex 代理功能** | **是**：Codex 的程式碼生成能力已被內建在 GPT‑4o（尤其是 `gpt-4o-mini`）中。沒有獨立的 Codex API 了，但你可以直接使用 GPT‑4o 的 `ChatCompletion` 產生程式碼。 |
+
+> 如果你還想使用舊 Codex 模型（在本地或自建環境），需要自行部署，OpenAI 官方已停止對 Codex API 的支援。對大多數開發者而言，直接切換到 GPT‑4o 或 GPT‑4 Turbo 就能得到更好的程式碼產出與成本效益。
+
+### 只要一行代碼就能把 Python 的 `dict`（或任何 JSON‑serialisable 物件）印成「漂亮」的 JSON：
+
+```python
+import json
+
+# 你的 JSON 物件（實際上就是一個 dict / list / str / int 等）
+data = {
+    "name": "Alice",
+    "age": 30,
+    "skills": ["Python", "Data Science", "Machine Learning"],
+    "address": {"city": "Taipei", "zip": "100"},
+}
+
+print(json.dumps(data, indent=4, sort_keys=True, ensure_ascii=False))
+```
+
+#### 參數說明
+
+| 參數 | 作用 | 範例 |
+|------|------|------|
+| `indent` | 每層縮排多少個空格（`None` 表示不縮排，`2`/`4` 常見） | `indent=4` → 4 個空格 |
+| `sort_keys` | 是否將字典鍵字順序化（有助於可重複性） | `sort_keys=True` |
+| `ensure_ascii` | `False` 允許印出 Unicode 字符（中文、日文等） | `ensure_ascii=False` |
+| `separators` | 指定 `item_separator` 與 `key_separator`，預設 `(',', ': ')` | `separators=(',', ': ')` 可以省略空
+格 |
+
+> **小技巧**
+> 若你只想快速「美化」一個已經是字串的 JSON，可直接 `on.dumps(json.loads(json_str), indent=4))`。
+
+---
+
+## 另一種方式：`pprint` 模組
+
+```python
+from pprint import pprint
+
+pprint(data, width=80, sort_dicts=True)
+```
+
+`pprint` 在某些情況下更容易閱讀，但它不是合法的 JSON 字串（例如使用單引號）。如果你需要真正的 JSON 字串，還是用
+`json.dumps`。
+
+---
+
+### 例子：完整腳本
+
+```python
+#!/usr/bin/env python3
+import json
+import sys
+
+def main():
+    # 假設你有一個 JSON 物件，或從文件、API 取得
+    data = {"foo": "bar", "numbers": [1, 2, 3], "nested": {"a": True, "b": None}}
+
+    # 將它格式化成美觀的 JSON 並直接印到 stdout
+    print(json.dumps(data, indent=4, sort_keys=True, ensure_ascii=False))
+
+if __name__ == "__main__":
+    main()
+```
+
+執行 `python script.py` 就能看到：
+
+```
+{
+    "foo": "bar",
+    "nested": {
+        "a": true,
+        "b": null
+    },
+    "numbers": [
+        1,
+        2,
+        3
+    ]
+}
+```
+
+> 這就是「印出 JSON 物件，且格式化顯示」最簡單、最常見的做法。祝你編程愉快 🚀
+
+edge-tts 是一個 Python 模組，它允許您在 Python 程式碼中使用 Microsoft Edge 的線上文字轉語音服務，或使用提供的 edge-tts 或 edge-playback 命令。
+
+安裝
+要安裝 edge-tts，請執行以下命令：
+
+$ pip install edge-tts
+
+如果您只想使用 edge-tts 和 edge-playback 指令，建議使用 pipx：
+
+$ pipx install edge-tts
+
+用法
+基本用法
+
+如果您想使用 edge-tts 命令，只需執行以下命令：
+
+$ edge-tts --text "Hello, world!" --write-media hello.mp3 --write-subtitles hello.srt
+
+如果您希望立即播放帶有字幕的文本，可以使用 edge-playback 命令：
+
+$ edge-playback --text "Hello, world!"
+
+請注意，除 Windows 系統外，edge-playback 需要安裝 mpv 命令列播放器。
+
+所有 edge-tts 指令可與 edge-playback 搭配使用，但 `--write-media`、`--write-subtitles` 和 `--list-voices` 選項除外。
+
+變更語音
+
+您可以使用 `--voice` 選項來變更文字轉語音服務所使用的語音。 `--list-voices` 選項可用於列出所有可用的語音。
+
+$ edge-tts --list-voices
+
+名稱 性別 內容類別 語音個性
+--------------------------------- ----------------------------------------------------------------------------
+
+af-ZA-Adri 神經質 女性 一般 友好，積極
+
+af-ZA-Willem 神經質 男性 一般 友好，積極
+
+am-ET-Ameha 神經質 男性 一般 友好，積極
+
+am-ET-Mekdes 神經質 女性 一般 友好，積極
+
+ar-AE-Fatima 神經質 女性 一般 友好，積極
+
+ar-AE-Hamdan 神經質 男性 一般 友好，積極
+
+ar-BH-Ali 神經質 男性 一般 友好，積極
+
+ar-BH-Laila 神經質 女性 一般 友好，積極
+
+ar-DZ-Amina 神經質 女性 一般 友好，積極
+
+ar-DZ-Ismael 神經質 男性 一般 友好，積極
+
+ar-EG-Salma 神經質 女性 一般 友好，積極
+
+…
+
+$ edge-tts --voice ar-EG-Salma 神經質 --text "مرحبا" كيف حالك؟" --write-media hello_in_arabic.mp3 --write-subtitles hello_in_arabic.srt
+
+自訂 SSML
+
+由於 Microsoft 禁止使用任何無法由 Microsoft Edge 本身產生的 SSML，因此已移除自訂 SSML 的支援。這意味著所有自訂 SSML 有用的場景都無法獲得支持，因為該服務僅允許使用一個 <voice> 標籤，且該標籤內只能包含一個 <prosody> 標籤。任何可在 <prosody> 標籤中使用的自訂選項都已可透過庫或命令列取得。
+
+變更語速、音量和音調
+
+您可以使用 --rate、--volume 和 --pitch 選項來變更產生語音的語速、音量和音調。使用負值時，您需要使用 --[option]=-50% 而不是 --[option] -50%，以避免該選項被解釋為命令列選項。
+
+$ edge-tts --rate=-50% --text "Hello, world!" --write-media hello_with_rate_lowered.mp3 --write-subtitles hello_with_rate_lowered.srt
+
+$ edge-tts --volume=-50% --text "Hello, world!" --write-media hello_with_volume_lowered.mp3 --write-subtitles hello_with_volume_lowered.srt
+
+$ edge-tts --pitch=-50Hz --text "Hello, world!" --write-media hello_with_pitch_lowered.mp3 --write-subtitles hello_with_pitch_lowered.srt
+
+Python 模組
+可以直接在 Python 中使用 edge-tts 模組。項目本身的範例包括：
+
+/examples/
+
+/src/edge_tts/util.py
+
+其他使用 edge-tts 模組的項目包括：
+
+hass-edge-tts
+
+Podcastfy
+
+tts-samples - 一個 mp3 音訊樣本庫，方便您為專案選擇合適的語音。

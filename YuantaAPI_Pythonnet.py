@@ -1,0 +1,4473 @@
+###程式名稱:YuantaAPI_Pythonnet.py
+###程式用途說明:本程式為使用YuantaOneAPI.dll的範例程式
+###特別說明:透過Pythonnet引用YuantaOneAPI.dll
+###範例程式更新日期:2025.02.27
+
+### 修改摘要 (2026.05.20 更新)
+### 1. 新增 StockQuoteState 類別封裝股票報價狀態管理
+###    - 支援五檔報價、成交明細、觀察清單等數據更新
+###    - 自動計算開高低收、漲跌價差、估計日成交量
+###    - 內外盤成交量分析，用於主力/散戶占比評估
+### 2. 統一訂閱數據存儲到全局 SUBSCRIPTION_STATE 字典
+###    - stocks: 各股票報價狀態 (StockQuoteState 實例)
+###    - system: 系統訊息
+###    - rq_rp: 查詢回應
+### 3. 實現異步 show() 方法 (含市場排程控制)
+###    - 每 1/60 秒更新 UI 顯示所有訂閱股票資訊
+###    - 交易時段(09:00-13:30): 每 5 秒保存完整報價到 CSV
+###    - 盤後搓合(13:30+~14:30): 暫停 CSV 輸出
+###    - 收盤後(14:30+): 寫入日總結 @stockID.csv 後停止
+### 4. 優化訂閱回應處理函數
+###    - SubscribeFiveTick_out: 處理五檔報價 (實測心跳訊號)
+###    - SubscribeWatclistAll_Out: 處理觀察清單報價
+###    - SubscribeStocktick_out: 處理分時成交明細
+###    - SubscribeWatchlist_Out: 處理指定欄位報價
+### 5. 新增異步 CSV 保存功能
+###    - _save_to_csv_async: 非阻塞式數據持久化，支援多股票並發保存
+### 6. 修復 pct_of_yesterday_avg 缺失問題 ? 待完善
+###    - StockQuoteState._load_yesterday_data(): 從 yesterday/ 載入昨量
+### 7. 新增日總結寫入 _write_daily_summary()
+###    - @stockID.csv: 每交易日一筆 OHLCV 供隔日快速載入
+###    - 同步更新 yesterday/{stockID}.csv 為最新日資料
+### 8. 修復 _display_quote_info() 重複顯示程式碼
+### 9. 市場排程輔助函數 _market_phase(): pre_open/trading/matching/closed/todo 設計tool from公開資訊 驗證csv正確性
+#10.  由api生成,for dashboard use, todo:新增各股時,需同時建立stock_ref.json 'stock'{name:} 包含股號,股名,於 _save_stock_ref_json 補足 stock_ref.json 所有api資訊
+
+import os
+import clr
+import json
+import time
+import signal
+import datetime as dt
+import struct
+import pathlib
+import sys
+import csv
+import random
+from pathlib import Path
+import pandas as pd
+import asyncio
+import logging
+from SocketStats import SocketState, EnumLoginStatusType   # ← 只要匯入一次
+
+
+logger = logging.getLogger(__name__)
+
+
+## 全局訂閱資料存儲狀態
+SUBSCRIPTION_STATE = {
+    'stocks': {},       #StockQuoteState
+    'system': [],
+    'rq_rp': {},        #AccountStatus
+    'login_status': EnumLoginStatusType.DEFAULT,
+    'event_counts': {},
+    'stock_ref':{}
+}
+"""
+class YuantaAPI_Pythonnet:          # 這是你原本的類別名稱（黑盒子內）
+# -----------------------------------------------------------------
+# 1️⃣  建構子 – 這是唯一需要動的地方
+# -----------------------------------------------------------------
+    def __init__(self, *args, **kwargs):
+        
+        原本的 __init__ 可能會有各種參數（host, port, username, password …）。
+        為了不破壞原始行為，我們使用 *args, **kwargs 把所有參數原樣傳給
+        父類別（或原始實作），然後在這裡附加我們自己的狀態字典。
+        若你確定原本的 __init__ 沒參數，亦可直接寫成 `def __init__(self):`。
+
+        為每一種可能的請求建立一個 SocketState 實例
+                
+        self._req_states = {
+            # 登入相關（已在 Login 部分特別處理，這裡保留以防萬一）
+            EnumLoginStatusType.CONNECT_LOGIN:   SocketState("CONNECT_LOGIN",   EnumLoginStatusType.CONNECT_LOGIN),
+            EnumLoginStatusType.LOGIN_SUCCESS:   SocketState("LOGIN_SUCCESS",   EnumLoginStatusType.LOGIN_SUCCESS),
+
+            # 常見的行情訂閱請求 – 依照你實際需要的 enum 加入／刪除
+            EnumLoginStatusType.REQ_FiveTickA:   SocketState("REQ_FiveTickA",   EnumLoginStatusType.REQ_FiveTickA),
+            EnumLoginStatusType.REQ_WatchlistAll:SocketState("REQ_WatchlistAll",EnumLoginStatusType.REQ_WatchlistAll),
+            EnumLoginStatusType.REQ_StockTick:   SocketState("REQ_StockTick",   EnumLoginStatusType.REQ_StockTick),
+            EnumLoginStatusType.REQ_SUBSCRIBE_ADD:SocketState("REQ_SUBSCRIBE_ADD",EnumLoginStatusType.REQ_SUBSCRIBE_ADD),
+            # 再依需求加入其他 REQ_* …
+        }
+
+        # （可選）如果你也想要追蹤 ACK 本身的狀態，可再加一個字典：
+        # self._ack_states = { … }
+   
+"""
+
+def to_uint32(v):
+    """將 C# API 可能溢位的 int32 值轉為 Python 無號整數。
+    API 以 signed int32 儲存累積量，超過 2^31-1 (2,147,483,647) 時會變負值。
+    此函數將負值還原為正確的 uint32 值 (0 ~ 4,294,967,295)。"""
+    if v is None:
+        return 0
+    if v < 0:
+        return v + 0x100000000  # 2^32
+    return v
+
+def _intraday_volume_progress(elapsed_min: float) -> float:
+    """台股日內累積成交量分布曲線（分段線性）。
+    回傳已過時間對應的預估累積成交量比例 (0~1)。
+
+    實測分布參考（依 2317/2330 實際比對校準）:
+      09:00-09:30 (0-30min):   累積 ~25%
+      09:30-11:00 (30-120min): 累積 ~52%
+      11:00-12:00 (120-180min):累積 ~68%
+      12:00-13:00 (180-240min):累積 ~78% (午盤量縮)
+      13:00-13:25 (240-265min):累積 ~93% (尾盤急拉)
+      13:25-13:30 (265-270min):累積 100%
+    """
+    if elapsed_min <= 0:
+        return 0.01
+    nodes = [
+        (0, 0),
+        (30, 0.25),
+        (120, 0.52),
+        (180, 0.68),
+        (240, 0.78),
+        (265, 0.93),
+        (270, 1.0),
+    ]
+    for i in range(len(nodes) - 1):
+        t0, v0 = nodes[i]
+        t1, v1 = nodes[i + 1]
+        if elapsed_min <= t1:
+            ratio = (elapsed_min - t0) / (t1 - t0)
+            return v0 + ratio * (v1 - v0)
+    return 1.0
+
+
+class StockQuoteState:    
+    def __init__(self, stock_id: str, market_no=None):        
+        self.stock_id = stock_id        
+        self.market_no = market_no        
+        self.latest_timestamp = None        
+        self.byIndexFlag = None
+        self.buy_prices = []
+        self.buy_volumes = []
+        self.sell_prices = []
+        self.sell_volumes = []
+        self.last_deal_price = None
+        self.last_deal_volume = None
+        self.total_in_volume = 0
+        self.total_out_volume = 0
+        self.total_volume = 0
+        self._snap_total_vol = 0   # 區間快照：上次 save 時的累積量
+        self._snap_total_in = 0    # 區間快照：上次 save 時的累積內盤量
+        self._snap_total_out = 0   # 區間快照：上次 save 時的累積外盤量
+        self.trade_count = 0
+        self.open_price = None
+        self.high_price = None
+        self.low_price = None
+        self.close_price = None
+        self.price_diff = None
+        self.prev_average_volume = None
+        self.estimated_day_volume = None
+        self.volume_label = None
+        self.pct_of_yesterday_avg = None
+        self.last_update = None
+        self.extra_data = {}
+        self.price_history = []
+        self.max_price_history = 20
+        self.ma5 = None
+        self.ma10 = None
+        self.price_momentum = None
+        # 預估量改進：追蹤近期成交量速率
+        self._vol_snapshot = (0, 0.0)  # (cum_vol_at_snapshot, timestamp)
+        self.last_saved_timestamp = None
+        self.yesterday_volume = None
+        self.yesterday_close = None
+        self.stock_type = 'unknown'  #large_cap,large_cap,mid_cap,small_cap,speculative
+        self.participation_score = None
+        try:
+            self._load_yesterday_data()
+        except Exception as e:
+            print(f"[StockQuoteState] 載入昨日數據失敗 {stock_id}: {e}")
+
+    def update_five_tick(self, byIndexFlag, buy_prices, buy_volumes, sell_prices, sell_volumes, timestamp=None):
+        self.byIndexFlag = byIndexFlag
+        self.buy_prices = buy_prices
+        self.buy_volumes = buy_volumes
+        self.sell_prices = sell_prices
+        self.sell_volumes = sell_volumes
+        self.last_update = timestamp or time.time()
+        self.latest_timestamp = self.last_update
+        self._infer_prices_from_depth()
+        self._append_price_history(self.close_price)
+        self._update_estimates()
+
+    def has_trade_activity(self):
+        return any(
+            [
+                self.last_deal_price is not None,
+                self.last_deal_volume is not None,
+                self.total_in_volume > 0,
+                self.total_out_volume > 0,
+                self.trade_count > 0,
+                bool(self.buy_prices),  # 至少收到五檔報價
+                self.close_price is not None,  # 已從五檔推斷出 OHLC
+            ]
+        )
+
+    def update_watchlist_all(self, byIndexFlag, timestamp=None, total_out=None, total_in=None, deal_price=None, deal_volume=None):
+        self.byIndexFlag = byIndexFlag
+        self.last_update = timestamp or time.time()
+        self.latest_timestamp = self.last_update
+
+        if total_out is not None:
+            self.total_out_volume = max(self.total_out_volume, to_uint32(total_out))
+        if total_in is not None:
+            self.total_in_volume = max(self.total_in_volume, to_uint32(total_in))
+        # 只更新成交量，不覆蓋 OHLC — 五檔 _infer_prices_from_depth 已提供更準確的 TWD 價格
+        if deal_volume is not None:
+            deal_volume = to_uint32(deal_volume)
+            self.last_deal_volume = deal_volume
+            self.total_volume += deal_volume
+            self.trade_count += 1
+
+            # 若有成交價格資料，交易量應累加入內外盤
+            if deal_price is not None and self.byIndexFlag in ('1', '2'):
+                if self.byIndexFlag == '1':
+                    self.total_out_volume += deal_volume
+                elif self.byIndexFlag == '2':
+                    self.total_in_volume += deal_volume
+
+        self._append_price_history(self.close_price)
+        self._update_estimates()
+
+    def update_stocktick(self, deal_price=None, deal_volume=None, in_out_flag=None, timestamp=None):
+        self.last_update = timestamp or time.time()
+        self.latest_timestamp = self.last_update
+
+        if deal_price is not None:
+            self.last_deal_price = deal_price
+        if deal_volume is not None:
+            deal_volume = to_uint32(deal_volume)
+            self.last_deal_volume = deal_volume
+            self.total_volume += deal_volume
+            self.trade_count += 1
+        if in_out_flag == '1':
+            self.total_out_volume += deal_volume or 0
+        elif in_out_flag == '2':
+            self.total_in_volume += deal_volume or 0
+
+        if self.open_price is None and self.last_deal_price is not None:
+            self.open_price = self.last_deal_price
+
+        if self.last_deal_price is not None:
+            if self.high_price is None or self.last_deal_price > self.high_price:
+                self.high_price = self.last_deal_price
+            if self.low_price is None or self.last_deal_price < self.low_price:
+                self.low_price = self.last_deal_price
+            self.close_price = self.last_deal_price
+            self._append_price_history(self.last_deal_price)
+
+        self._update_estimates()
+
+    def update_watchlist_field(self, byIndexFlag, int_value, timestamp=None):
+        self.byIndexFlag = byIndexFlag
+        self.last_update = timestamp or time.time()
+        self.latest_timestamp = self.last_update
+        self.extra_data[byIndexFlag] = int_value
+        # Watchlist 指定欄位（實測: 值單位為「張」，非「股」）:
+        # 4=累計外盤量(張), 6=累計內盤量(張)
+        # 使用 max() 保留較大值（盤中重啟復原用）
+        if byIndexFlag == '4':
+            self.total_out_volume = max(self.total_out_volume, to_uint32(int_value) * 1000)
+        elif byIndexFlag == '6':
+            self.total_in_volume = max(self.total_in_volume, to_uint32(int_value) * 1000)
+
+    def _update_estimates(self):
+        """盤中預估量 v2：動態投影 + 近期速率加權。
+
+        三層級：
+        1. 主力：Watchlist 累積內外盤量 / 時間進度 → 全日投影
+        2. 備援：StockTick total_volume / 時間進度（OTC 或 Watchlist 掉線時）
+        3. 降級：昨日量 × 時間權重（無任何今日數據時）
+
+        近期速率加權：追蹤最近 5 分鐘成交量速率，與固定曲線投影做 30:70 加權，
+        使預估能快速響應當日活躍度變化。
+        """
+        now = dt.datetime.now()
+        market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        market_close = now.replace(hour=13, minute=30, second=0, microsecond=0)
+
+        if now < market_open:
+            self.estimated_day_volume = self.prev_average_volume
+            self.volume_label = "盤前預估量"
+        elif now >= market_close:
+            # 盤後：以內外盤合計或 total_volume 為實際總量
+            actual_volume = self.total_in_volume + self.total_out_volume
+            if actual_volume <= 0:
+                actual_volume = self.total_volume
+            if actual_volume > 0:
+                self.estimated_day_volume = actual_volume
+                self.total_volume = actual_volume
+            elif self.total_volume:
+                self.estimated_day_volume = self.total_volume
+            else:
+                self.estimated_day_volume = self.prev_average_volume
+            self.volume_label = "盤後總量"
+        else:
+            elapsed_min = max((now - market_open).total_seconds() / 60.0, 1.0)
+            progress = _intraday_volume_progress(elapsed_min)
+
+            # 最佳累積量：優先 Watchlist 內外盤，其次 StockTick total_volume
+            actual_cum = self.total_in_volume + self.total_out_volume
+            if actual_cum <= 0:
+                actual_cum = self.total_volume
+
+            # --- 固定曲線投影 ---
+            curve_est = None
+            if actual_cum > 0 and progress > 0:
+                curve_est = int(actual_cum / progress)
+            elif self.prev_average_volume and self.prev_average_volume > 0:
+                curve_est = int(self.prev_average_volume * progress)
+
+            # --- 近期速率投影（5 分鐘視窗） ---
+            velocity_est = None
+            now_ts = time.time()
+            prev_cum, prev_ts = self._vol_snapshot
+            if prev_ts > 0 and actual_cum > prev_cum:
+                dt_sec = now_ts - prev_ts
+                if dt_sec >= 30:  # 至少 30 秒才更新速率
+                    rate_per_sec = (actual_cum - prev_cum) / dt_sec
+                    # 全日剩餘秒數
+                    remaining_sec = max((market_close - now).total_seconds(), 0)
+                    velocity_est = int(actual_cum + rate_per_sec * remaining_sec)
+
+            # 每 60 秒更新一次速率快照
+            if prev_ts == 0 or now_ts - prev_ts >= 60:
+                self._vol_snapshot = (actual_cum, now_ts)
+
+            # --- 加權混合 ---
+            if curve_est is not None and velocity_est is not None and curve_est > 0:
+                # 近期速率 30% + 固定曲線 70%（開盤 30 分鐘內速率權重提高到 50%）
+                vel_weight = 0.5 if elapsed_min <= 30 else 0.3
+                curve_weight = 1.0 - vel_weight
+                self.estimated_day_volume = max(0, int(velocity_est * vel_weight + curve_est * curve_weight))
+            elif curve_est is not None:
+                self.estimated_day_volume = max(0, curve_est)
+            elif velocity_est is not None:
+                self.estimated_day_volume = max(0, velocity_est)
+            else:
+                self.estimated_day_volume = self.prev_average_volume
+
+            self.volume_label = "盤中預估量"
+
+        if self.estimated_day_volume is not None and self.estimated_day_volume < 0:
+            self.estimated_day_volume = 0
+
+        if self.prev_average_volume and self.estimated_day_volume is not None and self.estimated_day_volume > 0:
+            self.pct_of_yesterday_avg = round(
+                (self.estimated_day_volume - self.prev_average_volume) / self.prev_average_volume * 100, 2)
+        else:
+            self.pct_of_yesterday_avg = None
+
+        if self.open_price is not None and self.close_price is not None:
+            self.price_diff = self.close_price - self.open_price
+
+        self._update_technical_indicators()
+        self._classify_participation()
+
+    # 台灣50成分股 (0050)，必定為大型股
+    _TW50 = frozenset({
+        '2330', '2317', '2454', '2412', '2881', '2882', '2886', '2891',
+        '2308', '2303', '2327', '2344', '2345', '2357', '2379', '2382',
+        '2395', '2408', '3008', '3034', '3045', '3711', '4904', '4938',
+        '5871', '5876', '5880', '6505', '1301', '1303', '1326', '2002',
+        '2207', '2603', '2609', '2610', '2615', '2633', '2801', '2880',
+        '2883', '2884', '2885', '2887', '2888', '2890', '2892', '2912',
+        '3443', '3533', '3661', '5269', '6415', '8046', '8299', '8454',
+    })
+
+    @staticmethod
+    def detect_stock_type(stock_id: str, price=None, avg_volume=None) -> str:
+        """依股號及價量特性分類: large_cap / mid_cap / small_cap / speculative。"""
+        if stock_id in StockQuoteState._TW50:
+            return 'large_cap'
+        if price and avg_volume:
+            daily_value = price * avg_volume
+            if daily_value > 500_000_000:
+                return 'large_cap'
+            if daily_value > 50_000_000:
+                return 'mid_cap'
+            if daily_value > 5_000_000:
+                return 'small_cap'
+            return 'speculative'
+        if len(stock_id) == 4 and stock_id[0] in ('2', '3', '4', '5', '6', '8', '9'):
+            return 'mid_cap'
+        return 'small_cap'
+
+    def _classify_participation(self):
+        """
+        依內外盤壓力與成交量特性，評分主力/散戶參度。
+        score > 0 → 主力買方主導
+        score < 0 → 主力賣方主導
+        score ~ 0 → 散戶盤整
+        """
+        score = 0
+        buy_total = sum(self.buy_volumes) if self.buy_volumes else 0
+        sell_total = sum(self.sell_volumes) if self.sell_volumes else 0
+        bid_ask_total = buy_total + sell_total
+
+        # 1. 五檔買賣壓力 (深度不平衡)
+        if bid_ask_total > 0:
+            score += (buy_total - sell_total) / bid_ask_total * 40
+
+        # 2. 內外盤成交偏向
+        in_out_total = self.total_in_volume + self.total_out_volume
+        if in_out_total > 0:
+            score += (self.total_in_volume - self.total_out_volume) / in_out_total * 35
+
+        # 3. 大單偏向 (每筆均量 vs 五日均量)
+        if self.trade_count > 0 and self.total_volume > 0:
+            avg_trade_size = self.total_volume / self.trade_count
+            if self.yesterday_volume and self.yesterday_volume > 0:
+                normal_size = self.yesterday_volume
+                if avg_trade_size > normal_size * 1.5:
+                    score += 15 if score > 0 else -15
+
+        # 4. 價格位置 (收盤 vs 均價)
+        if self.close_price and self.last_deal_price:
+            vwap = (self.total_in_volume * self.close_price + self.total_out_volume * self.close_price) / max(in_out_total, 1) if in_out_total > 0 else None
+            if vwap and self.close_price > vwap * 1.002:
+                score += 10
+            elif vwap and self.close_price < vwap * 0.998:
+                score -= 10
+
+        self.participation_score = round(score, 1)
+
+    def participation_label(self) -> str:
+        """回傳可讀的主力/散戶參與標籤。"""
+        if self.participation_score is None or self.participation_score == 0:
+            return 'N/A'
+        s = self.participation_score
+        if s > 30:
+            return '主力強力買進'
+        if s > 10:
+            return '主力溫和買進'
+        if s > -10:
+            return '散戶盤整'
+        if s > -30:
+            return '主力溫和賣出'
+        return '主力強力賣出'
+
+    def get_stock_type(self) -> str:
+        """回傳或自動偵測股票分類。"""
+        if self.stock_type == 'unknown':
+            self.stock_type = self.detect_stock_type(
+                self.stock_id,
+                price=self.close_price,
+                avg_volume=self.yesterday_volume)
+        return self.stock_type
+
+    def _load_yesterday_data(self):
+        """載入昨日成交量作為 prev_average_volume。
+        從 yesterday/{stock_id}.csv 讀取，支援兩種格式：
+        - 日總結格式（欄位：成交股數）— 單列合計
+        - 日內明細格式（欄位：deal_volume）— 多列合計"""
+        yesterday_path = os.path.join("yesterday", f"{self.stock_id}.csv")
+        if not os.path.exists(yesterday_path):
+            return
+        try:
+            df = pd.read_csv(yesterday_path, encoding="utf-8")
+            if len(df) == 0:
+                return
+            # 嘗試多種成交量欄位名稱
+            vol_col = None
+            for col in ["成交股數", "deal_volume", "total_volume"]:
+                if col in df.columns:
+                    vol_col = col
+                    break
+            if vol_col:
+                # 日總結格式：只有一列資料，取該列值（非 sum）
+                # 檢查是否為日總結（通常只有 1 列，或有「日期」欄位）
+                if "日期" in df.columns and len(df) <= 2:
+                    vol = int(df[vol_col].iloc[0]) if len(df) > 0 else 0
+                else:
+                    # 日內明細格式：多列 deal_volume 加總
+                    vol = int(df[vol_col].sum())
+                # 防禦：拒絕負值或天文數字 (>1e10 股不可能)
+                if 0 < vol < 1e10:
+                    self.yesterday_volume = vol
+                    self.prev_average_volume = vol
+                else:
+                    self.yesterday_volume = None
+                    self.prev_average_volume = None
+            # 收盤價 (含正規化)
+            for col in ["收盤價", "close_price"]:
+                if col in df.columns:
+                    raw = float(df[col].iloc[-1])
+                    self.yesterday_close = round(raw / 10000.0, 2) if abs(raw) >= 10000 else round(raw, 2)
+                    break
+        except Exception:
+            pass
+
+    def _infer_prices_from_depth(self):
+        if self.last_deal_price is not None:
+            return
+
+        best_bid = self.buy_prices[0] if self.buy_prices else None
+        best_ask = self.sell_prices[0] if self.sell_prices else None
+        bid_vol = self.buy_volumes[0] if self.buy_volumes else 0
+        ask_vol = self.sell_volumes[0] if self.sell_volumes else 0
+
+        # 無效掛單：價格為 0 或 成交量為 0 視為該側無單
+        if best_bid is not None and (best_bid == 0 or bid_vol == 0):
+            best_bid = None
+        if best_ask is not None and (best_ask == 0 or ask_vol == 0):
+            best_ask = None
+
+        if best_bid is None and best_ask is None:
+            return
+
+        if best_bid is None:
+            inferred_price = best_ask
+        elif best_ask is None:
+            inferred_price = best_bid
+        else:
+            inferred_price = round((best_bid + best_ask) / 2)
+
+        if inferred_price is None:
+            return
+
+        if self.open_price is None:
+            self.open_price = inferred_price
+        if self.high_price is None or inferred_price > self.high_price:
+            self.high_price = inferred_price
+        if self.low_price is None or inferred_price < self.low_price:
+            self.low_price = inferred_price
+        self.close_price = inferred_price
+
+        if self.open_price is not None and self.close_price is not None:
+            self.price_diff = self.close_price - self.open_price
+
+    def _append_price_history(self, price):
+        if price is None:
+            return
+        self.price_history.append(price)
+        if len(self.price_history) > self.max_price_history:
+            self.price_history.pop(0)
+
+    def _update_technical_indicators(self):
+        if self.price_history:
+            if len(self.price_history) >= 5:
+                self.ma5 = round(sum(self.price_history[-5:]) / 5, 2)
+            else:
+                self.ma5 = None
+            if len(self.price_history) >= 10:
+                self.ma10 = round(sum(self.price_history[-10:]) / 10, 2)
+            else:
+                self.ma10 = None
+            if len(self.price_history) >= 2:
+                self.price_momentum = round(self.price_history[-1] - self.price_history[-2], 2)
+            else:
+                self.price_momentum = None
+        else:
+            self.ma5 = None
+            self.ma10 = None
+            self.price_momentum = None
+
+    def has_data(self):
+        return any(
+            [
+                self.last_deal_price is not None,
+                self.last_deal_volume is not None,
+                self.total_volume > 0,
+                self.total_in_volume > 0,
+                self.total_out_volume > 0,
+                bool(self.buy_prices),
+                bool(self.buy_volumes),
+                bool(self.sell_prices),
+                bool(self.sell_volumes),
+                bool(self.extra_data),
+            ]
+        )
+
+    def build_save_record(self):
+        if self.latest_timestamp is None:
+            return None
+
+        self._infer_prices_from_depth()
+        # 放寬條件：五檔推斷的 OHLC 也算有效資料（適用於無 Watchlist 成交量的 OTC 股票）
+        if not self.has_data() and self.close_price is None:
+            return None
+
+        # 正規化價格：API 原始值 ×10000，若 >=10000 則 /10000 → 元（保留 2 位小數）
+        # 門檻 10000 (=1 元等值) 可涵蓋所有 ≥1 元的股票；<1 元極低價股直接保留原值
+        def _norm(p):
+            if p is None:
+                return None
+            p = float(p)
+            return round(p / 10000.0, 2) if abs(p) >= 10000 else round(p, 2)
+
+        # 計算 5 秒區間量差（累積量的 delta），而非最後一筆 tick 值
+        interval_vol = max(0, self.total_volume - self._snap_total_vol)
+        interval_in = max(0, self.total_in_volume - self._snap_total_in)
+        interval_out = max(0, self.total_out_volume - self._snap_total_out)
+        # 快照更新移至 commit_save_snapshot()，避免 to_display_dict() 頻繁重置快照
+
+        deal_amount = None
+        deal_price = _norm(self.last_deal_price or self.close_price)
+        if deal_price is not None and (interval_in + interval_out) > 0:
+            deal_amount = deal_price * (interval_in + interval_out)
+
+        # 區間成交量：取 Watchlist 內外盤 delta 與 StockTick 累積 delta 的最大值
+        interval_deal_vol = max(interval_in + interval_out, interval_vol)
+
+        # OHLC 正規化為「元」— 確保 CSV 與 cStock 單位一致
+        open_p = _norm(self.open_price)
+        high_p = _norm(self.high_price)
+        low_p = _norm(self.low_price)
+        close_p = _norm(self.close_price)
+
+        buy_sell_total = self.total_in_volume + self.total_out_volume
+        buy_sell_ratio = None
+        buy_total_volume = sum(self.buy_volumes) if self.buy_volumes else 0
+        sell_total_volume = sum(self.sell_volumes) if self.sell_volumes else 0
+        buy_sell_imbalance = None
+        buy_sell_pressure = None
+        if buy_sell_total > 0:
+            buy_sell_ratio = {
+                'in_pct': round(self.total_in_volume / buy_sell_total * 100, 2),
+                'out_pct': round(self.total_out_volume / buy_sell_total * 100, 2)
+            }
+        if buy_total_volume + sell_total_volume > 0:
+            buy_sell_imbalance = buy_total_volume - sell_total_volume
+            buy_sell_pressure = round(buy_sell_imbalance / (buy_total_volume + sell_total_volume) * 100, 2)
+
+        # 五檔價格正規化
+        norm_buy_prices = [_norm(p) for p in self.buy_prices] if self.buy_prices else []
+        norm_sell_prices = [_norm(p) for p in self.sell_prices] if self.sell_prices else []
+
+        price_diff_val = round(close_p - open_p, 2) if (open_p is not None and close_p is not None) else None
+
+        return {
+            'timestamp': dt.datetime.fromtimestamp(self.latest_timestamp).strftime('%Y%m%d %H:%M:%S'),
+            'stock_id': self.stock_id,
+            'deal_volume': interval_deal_vol,  # 取 Watchlist 與 StockTick 兩者 delta 的最大值
+            'last_tick_volume': self.last_deal_volume,  # 保留最後一筆 tick 量供參考
+            'deal_amount': deal_amount,
+            'open_price': open_p,
+            'high_price': high_p,
+            'low_price': low_p,
+            'close_price': close_p,
+            'price_diff': price_diff_val,
+            'trade_count': self.trade_count,
+            'estimated_day_volume': self.estimated_day_volume,
+            'volume_label': self.volume_label,
+            'pct_of_yesterday_avg': self.pct_of_yesterday_avg,
+            'total_in_volume': interval_in,   # 改為區間內盤量
+            'total_out_volume': interval_out,  # 改為區間外盤量
+            'cumulative_in_volume': self.total_in_volume,   # 保留累積值
+            'cumulative_out_volume': self.total_out_volume,  # 保留累積值
+            'cumulative_volume': self.total_volume,          # 保留累積值
+            'buy_total_volume': buy_total_volume,
+            'sell_total_volume': sell_total_volume,
+            'buy_sell_imbalance': buy_sell_imbalance,
+            'buy_sell_pressure': buy_sell_pressure,
+            'buy_sell_ratio': buy_sell_ratio,
+            'buy_prices': norm_buy_prices,
+            'buy_volumes': self.buy_volumes,
+            'sell_prices': norm_sell_prices,
+            'sell_volumes': self.sell_volumes,
+            'ma5': _norm(self.ma5) if self.ma5 is not None else None,
+            'ma10': _norm(self.ma10) if self.ma10 is not None else None,
+            'price_momentum': self.price_momentum,
+            'byIndexFlag': self.byIndexFlag,
+            'stock_type': self.stock_type,
+            'participation_score': self.participation_score,
+            'participation_label': self.participation_label(),
+            'extra_data': self.extra_data,
+        }
+
+    def to_display_dict(self):
+        return self.build_save_record()
+
+    def commit_save_snapshot(self):
+        """在 CSV 寫入後更新快照，確保區間 delta 只在真正保存時才重置。"""
+        self._snap_total_vol = self.total_volume
+        self._snap_total_in = self.total_in_volume
+        self._snap_total_out = self.total_out_volume
+
+
+def get_quote_state(stock_id: str, market_no=None) -> StockQuoteState:
+    state = SUBSCRIPTION_STATE['stocks'].get(stock_id)
+    if state is None:
+        state = StockQuoteState(stock_id, market_no)
+        SUBSCRIPTION_STATE['stocks'][stock_id] = state
+    return state
+
+##透過Clr引用系統標準函式
+clr.AddReference('System.Collections')
+##宣告增加DLL的引用路徑
+sys.path.append(Path(pathlib.Path(__file__).parent.resolve()).absolute())
+##透過Clr引用YuantaOneAPI.dll
+clr.AddReference('YuantaOneAPI')
+
+
+##匯入YuataOneAPI物件
+from YuantaOneAPI import (YuantaOneAPITrader, # pyright: ignore[reportMissingImports]
+                          enumEnvironmentMode,
+                          OnResponseEventHandler,
+                          YuantaDataHelper,
+                          enumLangType,
+                          enumLogType, #to set status C:\Yuanta\YuantaOneAPI\Log
+                          StockOrder,
+                          FutureOrder,
+                          OVFutureOrder,
+                          Watchlist,
+                          WatchlistAll,
+                          FiveTickA,
+			              StockTick,
+                          DepositOptimum,
+                          OrderStatus)
+
+from System.Collections.Generic import List # pyright: ignore[reportMissingImports]
+
+import System # type: ignore
+
+"""
+enumLogType,  #用來設定系統記錄日誌 (Log) 類別的列舉型別，包含
+NONE數值：0說明：不記錄任何的 Log 訊息。System數值：1說明：記錄一般 Log，但會排除訂閱即時回報與彙總資訊。COMMON數值：2說明：記錄一般 Log。COMMON_WITH_QUOTE數值：3說明：記錄一般 Log 以及特定行情 Log。ALL數值：4說明：全部訊息都強制進行記錄。
+"""
+#login_in
+#登入回應
+def login_out_response(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)  #Normal：Big5 ,UTF8 , SC
+    dataGetter.OutMsgLoad(abyData)    
+    result = ''
+    try:        
+        isLogin = True
+        #abyMsgCode訊息代碼
+        strMsgCode = dataGetter.GetStr(5)
+        #abyMsgContent中文訊息
+        strMsgContent = dataGetter.GetStr(50)
+        #uintCount筆數
+        intCount = dataGetter.GetUInt() #enumLogType
+
+        # 成功碼: '0001' (UAT) 或 '00001' (PROD)
+        if strMsgCode in ('0001', '00001'):            
+            result += f'登入成功 ({strMsgContent.strip()}) 帳號筆數:{intCount}\r\n'            
+            SUBSCRIPTION_STATE['login_status'] = EnumLoginStatusType.LOGIN_SUCCESS
+            for _ in range(intCount):
+                #abyAccount帳號
+                acct_id = dataGetter.GetStr(22)
+                #abyName客戶姓名
+                acct_name = dataGetter.GetStr(12)
+                #abyInvestorID身分證字號
+                investor_id = dataGetter.GetStr(14)
+                #shtSellerNo營業員代碼
+                shtSellNo = dataGetter.GetShort()
+                result += f'帳號:{acct_id} 姓名:{acct_name} 營業員:{shtSellNo}\r\n'
+                print(f'[{dt.datetime.now()}] 登入成功: {acct_id} ({acct_name}) {_} Ack client:{cli}')
+
+                 
+        else:
+            SUBSCRIPTION_STATE['login_status'] = EnumLoginStatusType.LOGIN_FAILE
+            result += f'登入失敗: code={strMsgCode} msg={strMsgContent}\r\n'
+            print(f'[{dt.datetime.now()}] 登入失敗: code={strMsgCode} {strMsgContent} client:{cli}')
+
+    except Exception as error:
+        SUBSCRIPTION_STATE['login_status'] = EnumLoginStatusType.LOGIN_FAILE
+        result = f'login_out_response error: {error} cli:{cli}'
+        print(f'[{dt.datetime.now()}] {result}')
+
+    return result
+
+#即時回報彙總(回補) 10.0.0.16 HOKE
+def get_real_report_merge_response(abyData):
+
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    nRowCount = 0
+
+    result = ''
+    
+    try:
+        #筆數
+        nRowCount = dataGetter.GetUInt()
+        #訊息添加即時回報筆數
+        result += '即時回報彙總(查詢結果) 筆數:'+str(nRowCount)+'\r\n'
+        
+        #循環處理回應資料
+        for _ in range(nRowCount):
+            #abyAccount帳號 
+            result += dataGetter.GetStr(22) + ',' 
+            #bytRptFlag回報標記  
+            result += '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyOrderNo委託單號  
+            result += dataGetter.GetStr(20)+ ',' 
+            #byMarketNo市場代碼  
+            result += '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyCompanyNo商品代碼  
+            result += dataGetter.GetStr(20) + ',' 
+            #struOrderDate交易日	
+            yuantaDate = dataGetter.GetTYuantaDate() 
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #struOrderTime委託時間  
+            yuantaTime = dataGetter.GetTYuantaTime() 
+            result += '{0}:{1}:{2}.{3}'.format(str(yuantaTime.bytHour), str(yuantaTime.bytMin), str(yuantaTime.bytSec), str(yuantaTime.ushtMSec)) + ',' 
+            #abyOrderType委託種類  
+            result += (dataGetter.GetStr(3))+ ',' 
+            #abyBS買賣別  S:賣；B:買
+            result += (dataGetter.GetStr(1)) + ',' 
+            #abyOrderPrice委託價  
+            result += dataGetter.GetStr(14)+ ',' 
+            #abyTouchPrice停損執行價  
+            result += dataGetter.GetStr(14)+','
+            #abyLastDealPrice最新成交價  
+            result += dataGetter.GetStr(14)+','
+            #abyAvgDealPrice成交均價  
+            result += dataGetter.GetStr(14)+','
+            #intBeforeQty改量前數量  
+            result += str(dataGetter.GetInt())+ ','  
+            #intOrderQty委託股數  
+            result += str(dataGetter.GetInt())+',' 
+            #intOkQty成交股數  
+            result += str(dataGetter.GetInt())+',' 
+            #abyOpenOffsetKind新增/沖銷別  
+            result += dataGetter.GetStr(1) + ',' 
+            #abyDayTrade當沖記號
+            result += dataGetter.GetStr(1)+ ',' 
+            #abyOrderCond委託條件
+            result += dataGetter.GetStr(1) + ',' 
+            #abyOrderErrorNo錯誤碼
+            result += dataGetter.GetStr(4) + ',' 
+            #byAPCode委託類別
+            result += '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #shtOrderStatus狀態碼
+            result += '{0}'.format(str(dataGetter.GetShort())) + ',' 
+            #byLastOrderStatus最新一筆即回資料狀態
+            result += '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyStkCName商品名稱
+            result += dataGetter.GetStr(20) + ',' 
+            #abyTradeCode實體交易代號
+            result += dataGetter.GetStr(20) + ','
+            #uintStrikePrice履約價
+            result += '{0}'.format(str(dataGetter.GetUInt())) + ',' 
+            #abyBasketNo一籃子下單編號
+            result += dataGetter.GetStr(32) + ','
+            #byStkType1屬性1
+            result += '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #byStkType2屬性2
+            result += '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #byBelongMarketNo所屬市場代碼
+            result += '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyBelongStkCode所屬股票代碼
+            result += dataGetter.GetStr(12) + ','
+            #abyStkOrderType委託價格種類
+            result += dataGetter.GetStr(1) + ','
+            #abyStkOrderErrorNo證券回報錯誤碼
+            result += dataGetter.GetStr(5) 
+            result += '\r\n'
+        
+    except Exception as error:
+        result = error
+
+    return result
+
+#即時回報(回補) 10.0.0.20 HOKE
+def get_real_report_response(abyData):
+
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    nRowCount = 0
+    result = ''
+    
+    try:
+        #筆數
+        nRowCount = dataGetter.GetUInt()
+        #訊息添加即時回報筆數
+        result += '即時回報(查詢結果) 筆數:'+str(nRowCount)+'\r\n'
+
+        #循環處理回應資料
+        for _ in range(nRowCount):
+            #abyAccount帳號 
+            result += dataGetter.GetStr(22) + ',' 
+            #bytRptType回報類別  
+            result += '{0}'.format(dataGetter.GetByte()) + ',' 
+            #abyOrderNo委託單號  
+            result += dataGetter.GetStr(20)+ ',' 
+            #byMarketNo市場代碼  
+            result += '{0}'.format(dataGetter.GetByte()) + ',' 
+            #abyCompanyNo商品代碼  
+            result += dataGetter.GetStr(20) + ','
+            #abyStkCName股票名稱  
+            result += dataGetter.GetStr(20) + ','  
+            #struOrderDate交易日		
+            yuantaDate = dataGetter.GetTYuantaDate() 
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #struOrderTime交易時間  
+            yuantaTime = dataGetter.GetTYuantaTime() 
+            result += '{0}:{1}:{2}.{3}'.format(str(yuantaTime.bytHour), str(yuantaTime.bytMin), str(yuantaTime.bytSec), str(yuantaTime.ushtMSec)) + ',' 
+            #abyOrderType委託種類  
+            result += dataGetter.GetStr(3) + ','  
+            #abyBS買賣別  
+            result += dataGetter.GetStr(1) + ','  
+            #abyPrice價位  
+            result += dataGetter.GetStr(14) + ','  
+            #abyTouchPrice停損執行價  
+            result += dataGetter.GetStr(14) + ',' 
+            #intBeforeQty改量前數量  
+            result += str(dataGetter.GetInt()) + ',' 
+            #intOrderQty數量  
+            result +=  str(dataGetter.GetInt()) + ',' 
+            #abyOpenOffsetKind新增/沖銷別  
+            result += dataGetter.GetStr(1) + ',' 
+            #abyDayTrade當沖記號
+            result += dataGetter.GetStr(1) + ',' 
+            #abyOrderCond委託條件
+            result += dataGetter.GetStr(1) + ',' 
+            #abyOrderErrorNo錯誤碼
+            result += dataGetter.GetStr(4) + ',' 
+            #bytTradeKind交易性質
+            result += '{0}'.format(dataGetter.GetByte()) + ','
+            #byAPCode委託類別
+            result += '{0}'.format(dataGetter.GetByte()) + ','
+            #abyBasketNo一籃子下單編號
+            result += dataGetter.GetStr(32) + ',' 
+            #byOrderStatus即回資料狀態
+            result += '{0}'.format(dataGetter.GetByte()) + ','
+            #byStkType1屬性1
+            result += '{0}'.format(dataGetter.GetByte()) + ','
+            #byStkType2屬性2
+            result += '{0}'.format(dataGetter.GetByte()) + ','
+            #byBelongMarketNo所屬市場代碼
+            result += '{0}'.format(dataGetter.GetByte()) + ','
+            #abyBelongStkCode所屬股票代碼
+            result +=  dataGetter.GetStr(12) + ',' 
+            #uintSeqNo成交序號
+            result +=  dataGetter.GetStr(4) + ',' 
+            #abyPriceType價格型態
+            result +=  dataGetter.GetStr(1) + ',' 
+            #abyStkErrCode證券回報錯誤碼
+            result +=  dataGetter.GetStr(5)
+            result += '\r\n'
+
+    except Exception as error:
+        result = error
+
+    return result
+
+#GetQuoteList
+#取得己訂閱報價商品列表
+def GetQuoteList_Out(abyData):
+    
+    result = ''
+    
+    try:
+        dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+        dataGetter.OutMsgLoad(abyData)
+        nRowCount = dataGetter.GetUInt()
+        result +='己訂閱報價商品列表 筆數{0}: \r\n'.format(nRowCount)
+        for i in range(nRowCount):
+            result += '{0} \r\n'.format(dataGetter.GetStr(50))
+            
+    except Exception as error:
+        result = error
+        
+    return result
+
+#stk_order_out_response	
+#現貨下單回應 30.100.10.31
+def stk_order_out_response(abyData):
+
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+
+    result = ''
+    
+    try:
+        result += '現貨下單結果:\r\n'
+		#abyMsgCode訊息代碼 0001代表執行成功，其他則為失敗
+        result += dataGetter.GetStr(4) + ',' 
+		#abyMsgContent訊息內容
+        result += dataGetter.GetStr(75) + ',' 
+		#uintCount筆數
+        Rcount = dataGetter.GetUInt() 
+        
+        #訊息添加下單筆數  
+        result += '下單筆數:' + str(Rcount) + '\r\n'
+
+		#循環處理回應資料
+        for _ in range(Rcount):
+		    #intIdentify識別碼 
+            result += '{0}'.format(str(dataGetter.GetInt())) + ',' 
+			#shtReplyCode委託結果代碼 0代表委託成功，其他則為委託失敗
+            result += '{0}'.format(str(dataGetter.GetShort())) + ',' 
+			#abyOrderNO委託書編號
+            result += dataGetter.GetStr(5) + ',' 
+			#struTradeDate交易日期
+            yuantaDate = dataGetter.GetTYuantaDate() 
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #abyErrType錯誤類別
+            result += dataGetter.GetStr(1) + ',' 
+			#abyErrNO錯誤代號
+            result += dataGetter.GetStr(3) + ',' 
+			#abyAdvisory錯誤說明
+            result += dataGetter.GetStr(120)
+            result += '\r\n'
+            
+    except Exception as error:
+        result = error
+
+    return result
+
+#future_order_out_response	
+#期貨下單回應 30.100.20.24
+def future_order_out_response(abyData):
+
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    result = '' 
+    
+    try:
+        result += '期貨下單結果: \r\n'
+		#abyMsgCode訊息代碼 0001代表執行成功，其他則為失敗
+        result += dataGetter.GetStr(4) + ',' 
+		#abyMsgContent訊息內容
+        result += dataGetter.GetStr(50) + ',' 
+		#uintCount筆數
+        Rcount = dataGetter.GetUInt() 
+        
+        #訊息添加下單筆數  
+        result += '下單筆數:' + str(Rcount) + '\r\n'
+
+		#循環處理回應資料
+        for _ in range(Rcount):
+		    #intIdentify識別碼 
+            result += '{0}'.format(str(dataGetter.GetInt())) + ',' 
+			#shtReplyCode委託結果代碼 0代表委託成功，其他則為委託失敗
+            result += '{0}'.format(str(dataGetter.GetShort())) + ',' 
+			#abyOrderNO委託書編號
+            result += dataGetter.GetStr(5) + ',' 
+			#struTradeDate交易日期
+            yuantaDate = dataGetter.GetTYuantaDate() 
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #abyErrKind錯誤類別
+            result += dataGetter.GetStr(1) + ',' 
+			#abyErrNO錯誤代號
+            result += dataGetter.GetStr(3) + ',' 
+			#abyAdvisory錯誤說明
+            result += dataGetter.GetStr(74) 
+            result += '\r\n'
+            
+    except Exception as error:
+        result = error
+
+    return result
+
+#OVFuture_order_out_response
+#海外期貨下單回應 30.100.40.12
+def OVFuture_order_out_response(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+
+    result = '' 
+
+    try:
+        result += '國外期貨下單結果: \r\n'
+        #abyMsgCode訊息代碼 0001代表執行成功，其他則為失敗
+        result += dataGetter.GetStr(4) + ',' 
+        #abyMsgContent訊息內容
+        result += dataGetter.GetStr(50) + ',' 
+        #uintCount筆數
+        Rcount = dataGetter.GetUInt()  
+        
+        #訊息添加下單筆數  
+        result += '下單筆數:' + str(Rcount) + '\r\n'
+        
+        #循環處理回應資料
+        for _ in range(Rcount):
+            #intIdentify識別碼 
+            result += '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #shtReplyCode委託結果代碼 
+            result += '{0}'.format(str(dataGetter.GetShort())) + ',' 
+            #abyOrderNO委託書編號 
+            result += str(dataGetter.GetStr(5)) + ',' 
+            #struTradeDate交易日期 
+            yuantaDate = dataGetter.GetTYuantaDate() 
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #abyErrType錯誤類別 
+            result += str(dataGetter.GetStr(1)) + ',' 
+            #abyErrNO錯誤代號 
+            result += str(dataGetter.GetStr(3)) + ',' 
+            #abyAdvisory錯誤說明 
+            result += str(dataGetter.GetStr(74))  
+            result +='\r\n'
+        
+    except Exception as error:
+        result = error
+
+    return result
+
+#ReadWatchlistAll_response 漲跌停融資融券成數
+#讀取行情報價 50.0.0.16
+def ReadWatchListAll_Out(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+
+    #筆數
+    nRowCount = dataGetter.GetUInt()
+    result = ''
+    result = '讀取報價表結果:\r\n'
+    print(f'{result } 筆數{nRowCount}')
+
+    try:
+        for i in range(nRowCount):
+            market_no = str(dataGetter.GetByte())
+            stock_id = dataGetter.GetStr(12)
+            stock_name = dataGetter.GetStr(20)
+            yst_price = dataGetter.GetInt()       # 昨收價
+            open_ref = dataGetter.GetInt()         # 開盤參考價
+            up_price = dataGetter.GetInt()         # 漲停價
+            down_price = dataGetter.GetInt()       # 跌停價
+            yst_vol = dataGetter.GetInt()          # 昨量
+            ext_name = dataGetter.GetStr(20)       # 擴充名
+            decimal = dataGetter.GetShort()        # 小數位數
+            credit_pct = dataGetter.GetByte()      # 融資成數
+            bond_pct = dataGetter.GetByte()        # 融券成數
+            OpenPrice = dataGetter.GetInt()        #開盤
+            HighPrice = dataGetter.GetInt()        #最高
+            LowPrice = dataGetter.GetInt()        #最低
+            BuyPrice = dataGetter.GetInt()         #買價
+            TotalOutVol = dataGetter.GetInt()     #累計外盤量
+            SellPrice = dataGetter.GetInt()       #賣價
+            TotalInVol = dataGetter.GetInt()      #累計內盤量
+            DealPrice = dataGetter.GetInt()      #成交價
+            TotalDealAmt = dataGetter.GetInt()   #總成交金額
+            bytVolFlag = dataGetter.GetByte()    #單量內外盤標記            
+            
+            # 假設這是您「最新、最完整」的股票資料結構範本
+            # 未來如果又要增加新欄位（例如：新增 'volume' 欄位），直接加在這裡即可！
+            SUBSCRIPTION_STATE.('stock_ref', {})[stock_id] = {
+                'market_no': market_no,
+                'stock_name': stock_name,
+                'yst_price': yst_price,
+                'open_ref': open_ref,
+                'up_price': up_price,
+                'down_price': down_price,
+                'yst_vol': yst_vol,
+                'ext_name': ext_name,
+                'decimal': decimal,
+                'credit_pct': credit_pct,
+                'bond_pct': bond_pct,
+                # "new_feature_key": "default_value"  <-- 未來擴充直接加這
+                'OpenPrice': OpenPrice,
+                'HighPrice': HighPrice,
+                'LowPrice': LowPrice,
+                'BuyPrice': BuyPrice,
+                'TotalOutVol' : TotalOutVol,
+                'SellPrice' : SellPrice,
+                'TotalInVol' : TotalInVol,
+                'DealPrice' : DealPrice,
+                'TotalDealAmt' : TotalDealAmt,
+                'uintVol' : uintVol,    #單量內外盤標記
+                'singleVol' : singleVol, #單量
+                'TotalVol' : TotalVol,   #總成交量
+            }
+           
+            # print(f"存入SUBSCRIPTION_STATE筆數{nRowCount}")
+
+            result +='\r\n市場別:{0} 商品代碼:{1} 商品名稱:{2}\r\n昨收價:{3}\r\n開盤參考價:{4}\r\n漲停價:{5}\r\n跌停價:{6}\r\n昨量:{7}\r\n擴充名:{8}\r\n小數位數:{9}\r\n融資成數:{10}\r\n融券成數:{11}\r\n開盤價:{12}\r\nstr(最高價):{13},\r\n最低價:{14},\r\n買價:{15},\r\n累計外盤量:{16}\r\n賣價:{17}\r\n累計內盤量:{18},\r\n成交價:{19}\r\n總成交金額:{20}\r\n單量內外盤標記:{21}\r\n單量:{22}\r\n總成交量:{23}\r\n筆數:{24}'.format(
+                market_no, stock_id, stock_name,
+                str(yst_price), str(open_ref), str(up_price), str(down_price),
+                str(yst_vol), ext_name, str(decimal), str(credit_pct), str(bond_pct),str(OpenPrice),str(HighPrice), str(LowPrice),str(BuyPrice),str(TotalOutVol),str(SellPrice), str(TotalInVol),str(DealPrice ),str(TotalDealAmt),str,(uintVol),str(singleVol),str(TotalVol),str(bytVolFlag))            
+
+            dataGetter.GetStr(105); #後面資料沒用到就不解析 需要請自行參考文件調整
+        # print(f"_save_stock_ref_json:{SUBSCRIPTION_STATE['stock_ref']}")
+
+        _save_stock_ref_json() #update 漲跌停價 ... for dashboard refresh
+
+    except Exception as error:
+        result = error
+        print(f"Exception error {error}")
+        time.sleep(0.333)
+    #time.sleep(3)
+    return result
+
+#stk_OrderTradeReport
+#委託成交綜合回報 20.101.0.18
+def stk_OrderTradeReport(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    result = ''
+    
+    try:
+        #uintCount1現貨委託筆數
+        count=dataGetter.GetInt()
+        result += '現貨委託筆數:'+ str(count) +'\r\n'
+        
+        for _ in range(count):
+            #struStkAccountInfo帳號
+            result += dataGetter.GetStr(22) + ','
+            #struTradeYMD交易日
+            yuantaDate = dataGetter.GetTYuantaDate() 
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ',' 
+            #byMarketNo市場代碼
+            result += str(dataGetter.GetByte()) + ','
+            #abyMarketName市場名稱 
+            result += dataGetter.GetStr(30) + ',' 
+            #abyCompanyNo股票代號
+            result += dataGetter.GetStr(12) + ',' 
+            #abyStkName股票名稱
+            result += dataGetter.GetStr(30) + ',' 
+            #shtOrderType委託種類
+            result += str(dataGetter.GetShort()) + ',' 
+            #abyBS買賣別
+            result += dataGetter.GetStr(1)+ ',' 
+            #lngPrice價位
+            result += str(dataGetter.GetLong()) + ',' 
+            #abyPriceFlag價格種類
+            result += dataGetter.GetStr(1)+ ',' 
+            #intBeforeQty前一次委託量
+            result += str(dataGetter.GetInt()) + ',' 
+            #intAfterQty目前委託量  
+            result += str(dataGetter.GetInt()) + ','   
+            #intOkQty成交量    
+            result += str(dataGetter.GetInt()) + ','    
+            #shtOrderStatus委託狀態
+            result += str(dataGetter.GetShort()) + ',' 
+            #struAcceptDate委託日期
+            yuantaDate = dataGetter.GetTYuantaDate() 
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','     
+            #struAcceptTime委託時間 
+            yuantaTime = dataGetter.GetTYuantaTime() 
+            result += '{0}:{1}:{2}.{3}'.format(str(yuantaTime.bytHour), str(yuantaTime.bytMin), str(yuantaTime.bytSec), str(yuantaTime.ushtMSec)) + ',' 
+            #abyOrderNo委託單號 
+            result += dataGetter.GetStr(5) + ',' 
+            #abyOrderErrorNo錯誤碼
+            result += dataGetter.GetStr(5) + ','  
+            #abyEmError錯誤原因
+            result += dataGetter.GetStr(120) + ',' 
+            #shtSeller營業員代碼 
+            result += str(dataGetter.GetShort()) + ','    
+            #abyChannel  
+            result += dataGetter.GetStr(3) + ',' 
+            #shtAPCode  
+            result += str(dataGetter.GetShort()) + ','   
+            #intOTax證交稅
+            result += str(dataGetter.GetInt()) + ',' 
+            #intOCharge手續費
+            result += str(dataGetter.GetInt()) + ',' 
+            #intODueAmt應收付
+            result += str(dataGetter.GetInt()) + ',' 
+            #abyCancelFlag可取消Flag
+            result += dataGetter.GetStr(1)+ ',' 
+            #abyReduceFlag可減量Flag
+            result += dataGetter.GetStr(1)+ ',' 
+            #abyTraditionFlag傳統單Flag 
+            result += dataGetter.GetStr(1)+ ','    
+            #abyBasketNo 
+            result += dataGetter.GetStr(10)+ ','    
+            #abyTradeCurrency報價幣別 
+            result += dataGetter.GetStr(3)+ ','     
+            #abyTime_in_Force委託效期 
+            result += dataGetter.GetStr(1)+ ','     
+            #abyOrder_Success委託成功旗標
+            result += dataGetter.GetStr(1)+ ','     
+            #abyReduce_Flag本委託下單是否被減量
+            result += dataGetter.GetStr(1)+ ','    
+            #abyChg_Prz_Flag本委託下單是否進行改價
+            result += dataGetter.GetStr(1)+ ','      
+            #abyTSE_Cancel本委託下單是否被交易所主動刪單
+            result += dataGetter.GetStr(1)+ ','       
+            #intCancelQty取消數量
+            result += str(dataGetter.GetInt()) + ',' 
+            #intOR_QTY原委託量
+            result += str(dataGetter.GetInt()) + ','     
+            #struUpdateDate更新日期
+            yuantaDate = dataGetter.GetTYuantaDate() 
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','   
+            #struUpdateTime更新時間  
+            yuantaTime = dataGetter.GetTYuantaTime() 
+            result += '{0}/{1}/{2}'.format(yuantaTime.bytHour, yuantaTime.bytMin, yuantaTime.bytSec, yuantaTime.ushtMSec) + ','      
+            result += '\r\n'
+        
+        #uintCount2現貨成交筆數
+        count=dataGetter.GetInt()
+        result += '現貨成交筆數:'+ str(count) +'\r\n'
+        
+        for _ in range(count):
+            #abyAccount帳號
+            result += dataGetter.GetStr(22) + ',' 
+            #byMarketNo市場代碼
+            result += str(dataGetter.GetByte()) + ',' 
+            #abyMarketName市場名稱 
+            result += dataGetter.GetStr(30) + ',' 
+            #abyCompanyNo股票代號
+            result += dataGetter.GetStr(12) + ',' 
+            #abyStkName股票名稱
+            result += dataGetter.GetStr(30) + ',' 
+            #shtOrderType委託種類
+            result += str(dataGetter.GetShort()) + ',' 
+            #abyBS買賣別 
+            result += dataGetter.GetStr(1)+ ',' 
+            #intOkStockNos成交量
+            result += str(dataGetter.GetInt()) + ','
+            #lngOPrice委託價
+            result += str(dataGetter.GetLong()) + ',' 
+            #lngSPrice成交價 
+            result += str(dataGetter.GetLong()) + ','
+            #struDateTime交易日(年月日時分秒毫秒)
+            yuantaDateTime = dataGetter.GetTYunataDateTime() 
+            result += '{0}/{1}/{2} {3}:{4}:{5}.{6}'.format(yuantaDateTime.struDate.ushtYear, yuantaDateTime.struDate.bytMon, yuantaDateTime.struDate.bytDay, yuantaDateTime.struTime.bytHour, yuantaDateTime.struTime.bytMin, yuantaDateTime.struTime.bytSec, yuantaDateTime.struTime.ushtMSec) + ','           
+            #abyOrderNo委託單號 
+            result += dataGetter.GetStr(5) + ',' 
+            #abyTradeCurrency報價幣別 
+            result += dataGetter.GetStr(3) + ',' 
+            #abyPrice_Flag價位Flag  
+            result += dataGetter.GetStr(1) + ','   
+            #shtExchange_Code委託別
+            result += str(dataGetter.GetShort()) + ','             
+            result += '\r\n'
+
+        #uintCount3期貨委託筆數
+        uintFutOrderCount = dataGetter.GetUInt()
+        result += '期貨委託筆數: ' + str(uintFutOrderCount) + '\r\n'
+        
+        for _ in range(uintFutOrderCount):
+            #abyAccount期貨帳號
+            result += dataGetter.GetStr(22) +','
+            #struTradeDate交易日期
+            yuantaDate = dataGetter.GetTYuantaDate()
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #byMarketNo市場代碼
+            result += '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyMarketName市場名稱
+            result += dataGetter.GetStr(30) +',' 
+            #abyCommodityID1商品名稱1
+            result += dataGetter.GetStr(7) +',' 
+            #intSettlementMonth1商品月份1
+            result += '{0}'.format(str(dataGetter.GetInt())) + ','
+            #intStrikePrice1履約價1
+            result += '{0}'.format(str(dataGetter.GetInt())) + ','
+            #abyBuySellKind1買賣別1
+            result += dataGetter.GetStr(1) +',' 
+            #abyCommodityID2商品名稱2
+            result += dataGetter.GetStr(7) +',' 
+            #intSettlementMonth2商品月份2
+            result += '{0}'.format(str(dataGetter.GetInt())) + ','
+            #intStrikePrice2履約價2
+            result += '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #abyBuySellKind2買賣別2
+            result += dataGetter.GetStr(1) +',' 
+            #abyOpenOffsetKind新/平倉 0:新倉,1:平倉,2系統
+            result += dataGetter.GetStr(1) +',' 
+            #abyOrderCondition委託條件 
+            result += dataGetter.GetStr(1) +',' 
+            #abyOrderPrice委託價 
+            result += dataGetter.GetStr(10) +',' 
+            #intBeforeQty前一次委託量 
+            result += '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #intAferQty目前委託量 
+            result += '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #intOKQty成交口數 
+            result += '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #shtStatus委託狀態 
+            result += '{0}'.format(str(dataGetter.GetShort())) + ',' 
+            #struAcceptDate委託日期
+            yuantaDate = dataGetter.GetTYuantaDate()
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #struAcceptTime委託時間
+            yuantaTime = dataGetter.GetTYuantaTime() 
+            result += '{0}:{1}:{2}.{3}'.format(str(yuantaTime.bytHour), str(yuantaTime.bytMin), str(yuantaTime.bytSec), str(yuantaTime.ushtMSec)) + ',' 
+            #abyErrorNo錯誤代碼 
+            result += dataGetter.GetStr(10) +',' 
+            #abyErrorMessage錯誤訊息 
+            result += dataGetter.GetStr(120) +',' 
+            #abyOrderNO委託單號 
+            result += dataGetter.GetStr(5) +',' 
+            #abyProductType商品種類 
+            result += dataGetter.GetStr(1) +',' 
+            #ushtSeller營業員代碼 
+            result += '{0}'.format(str(dataGetter.GetUShort())) + ','
+            #lngTotalMatFee手續費總和 
+            result += '{0}'.format(str(dataGetter.GetLong())) + ','
+            #lngTotalMatExchTax交易稅總和 
+            result += '{0}'.format(str(dataGetter.GetLong())) + ','
+            #lngTotalMatPremium應收付 
+            result += '{0}'.format(str(dataGetter.GetLong())) + ','
+            #abyDayTradeID當沖註記 
+            result += dataGetter.GetStr(1) +',' 
+            #abyCancelFlag可取消Flag 
+            result += dataGetter.GetStr(1) +',' 
+            #abyReduceFlag可減量Flag 
+            result += dataGetter.GetStr(1) +','
+            #abyStkName1商品名稱1 
+            result += dataGetter.GetStr(30) +','
+            #abyStkName2商品名稱2 
+            result += dataGetter.GetStr(30) +','
+            #abyTraditionFlag傳統單Flag 
+            result += dataGetter.GetStr(1) +','
+            #abyTRID商品代碼 
+            result += dataGetter.GetStr(20) +','
+            #abyCurrencyType交易幣別 
+            result += dataGetter.GetStr(3) +','
+            #abyCurrencyType2交割幣別 
+            result += dataGetter.GetStr(3) +','
+            #abyBasketNo 
+            result += dataGetter.GetStr(10) +','
+            #byMarketNo1市場代碼1 
+            result += '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyStkCode1行情股票代碼1 
+            result += dataGetter.GetStr(12) +','
+            #byMarketNo2市場代碼2 
+            result +=  '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyStkCode2行情股票代碼2 
+            result +=  dataGetter.GetStr(12) 
+            result+='\r\n'
+        
+        #uintCount4期貨成交筆數
+        uintFuTradeCount = dataGetter.GetUInt()
+        result += '期貨成交筆數: ' + str(uintFuTradeCount) + '\r\n'
+        
+        for _ in range(uintFuTradeCount):
+            #abyAccount期貨帳號
+            result +=  dataGetter.GetStr(22) +','
+            #byMarketNo市場代碼
+            result +=  '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyMarketName市場名稱
+            result +=  dataGetter.GetStr(30) +','
+            #abyCommodityID1商品名稱1
+            result +=  dataGetter.GetStr(7) +','
+            #intSettlementMonth1商品月份1
+            result +=   '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #abyBuySellKind1買賣別1
+            result +=  dataGetter.GetStr(1) +','
+            #intMatchQty成交口數
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ','
+            #lngMatchPrice1成交價1
+            result +=  '{0}'.format(str(dataGetter.GetLong())) + ','
+            #lngMatchPrice2成交價2
+            result +=  '{0}'.format(str(dataGetter.GetLong())) + ','
+            #struMatchTime成交時間
+            yuantaTime = dataGetter.GetTYuantaTime() 
+            result += '{0}:{1}:{2}.{3}'.format(str(yuantaTime.bytHour), str(yuantaTime.bytMin), str(yuantaTime.bytSec), str(yuantaTime.ushtMSec)) + ',' 
+            #struMatchDate成交日期
+            yuantaDate = dataGetter.GetTYuantaDate()
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #abyOrderNO委託單號
+            result +=   dataGetter.GetStr(5) +','
+            #intStrikePrice1履約價1
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ','
+            #abyCommodityID2商品名稱2
+            result +=  dataGetter.GetStr(7) +','
+            #intSettlementMonth2商品月份2
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ','
+            #abyBuySellKind2買賣別2
+            result += dataGetter.GetStr(1) +','
+            #intStrikePrice2履約價2
+            result += '{0}'.format(str(dataGetter.GetInt())) + ','
+            #abyRecType單式單/複式單 “1”:單式 “2”:複式
+            result += dataGetter.GetStr(1) +','
+            #abyProductType商品種類
+            result += dataGetter.GetStr(1) +','
+            #lngOrderPrice委託價
+            result += '{0}'.format(str(dataGetter.GetLong())) + ','
+            #abyStkName1商品名稱1
+            result += dataGetter.GetStr(30) +','
+            #abyStkName2商品名稱2
+            result += dataGetter.GetStr(30) +','
+            #abyDayTradeID當沖註記
+            result += dataGetter.GetStr(1) +','
+            #lng SprMatchPrice複式單成交價
+            result +=  '{0}'.format(str(dataGetter.GetLong())) + ','
+            #abyTRID商品代碼
+            result += dataGetter.GetStr(20) +','
+            #abyCurrencyType交易幣別
+            result += dataGetter.GetStr(3) +','
+            #abyCurrencyType2交割幣別
+            result += dataGetter.GetStr(3) +','
+            #abySubNo子成交序號 0(單式)1(複式腳1)2(複式腳2)
+            result += dataGetter.GetStr(1) 
+            result +='\r\n'
+
+        #uintCount5國外股票委託筆數
+        uintOVOrderCount = dataGetter.GetUInt()
+        result += '國外股票委託筆數: ' + str(uintOVOrderCount) + '\r\n'
+        
+        for _ in range(uintOVOrderCount):
+            #abyAccount證券帳號
+            result +=  dataGetter.GetStr(22) +','
+            #struTradeYMD交易日
+            yuantaDate = dataGetter.GetTYuantaDate()
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #byMarketNo市場代碼
+            result +=  '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyMarketName市場名稱
+            result +=  dataGetter.GetStr(30) +','
+            #abyCompanyNo股票代碼
+            result +=  dataGetter.GetStr(12) +','
+            #abyStkName股票名稱
+            result +=  dataGetter.GetStr(30) +','
+            #abyBS買賣別
+            result +=  dataGetter.GetStr(1) +','
+            #abyCurrencyType交易幣別
+            result +=  dataGetter.GetStr(3) +','
+            #lngPrice委託價
+            result +=  '{0}'.format(str(dataGetter.GetLong())) + ',' 
+            #abyPriceType價格型態
+            result +=  dataGetter.GetStr(3) +','
+            #intOrderQty委託量
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #intMatchQty成交量
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #shtOrderStatus狀態碼
+            result +=  '{0}'.format(str(dataGetter.GetShort())) + ',' 
+            #struOrderTime委託時間
+            yuantaTime = dataGetter.GetTYuantaTime() 
+            result += '{0}:{1}:{2}.{3}'.format(str(yuantaTime.bytHour), str(yuantaTime.bytMin), str(yuantaTime.bytSec), str(yuantaTime.ushtMSec)) + ',' 
+            #abyOrderType委託單型態
+            result +=  dataGetter.GetStr(3) +','
+            #abyOrderNo委託書編號
+            result +=  dataGetter.GetStr(7) +','
+            #intFee手續費
+            result +=   '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #lngPolarisAMT應收付金額
+            result +=  '{0}'.format(str(dataGetter.GetLong())) + ',' 
+            #abyOrderErrorNo錯誤碼
+            result +=  dataGetter.GetStr(8) +','
+            #abyEmError錯誤原因
+            result +=  dataGetter.GetStr(180) +','
+            #abyCurrencyType2交割幣別
+            result +=  dataGetter.GetStr(3) +','
+            #abyCancelFlag可取消Flag
+            result +=  dataGetter.GetStr(1) +','
+            #abyReduceFlag可減量Flag
+            result +=  dataGetter.GetStr(1) +','
+            #abyTraditionFlag傳統單Flag
+            result +=  dataGetter.GetStr(1) +','
+            #abySettleType交割方式
+            result +=  dataGetter.GetStr(1) +','
+            #abyBasketNo
+            result +=  dataGetter.GetStr(10) 
+
+        #uintCount6國外股票成交筆數
+        uintOVTradeCount = dataGetter.GetUInt()
+        result += '國外股票成交筆數: ' + str(uintOVTradeCount) + '\r\n'
+        
+        for _ in range(uintOVTradeCount):
+            #abyAccount現貨帳號
+            result +=  dataGetter.GetStr(22) +','
+            #byMarketNo市場代碼
+            result +=  '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyMarketName市場名稱
+            result +=  dataGetter.GetStr(30) +','
+            #abyCompanyNo股票代碼
+            result +=  dataGetter.GetStr(12) +','
+            #abyStkName股票名稱
+            result +=  dataGetter.GetStr(30) +','
+            #abyBS買賣別
+            result +=  dataGetter.GetStr(1) +','
+            #abyCurrencyType交易幣別
+            result +=  dataGetter.GetStr(3) +','
+            #intMatchQty成交量
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ','
+            #lngOrderPrice委託價
+            result +=  '{0}'.format(str(dataGetter.GetLong())) + ','
+            #lngMatchPrice成交價
+            result +=  '{0}'.format(str(dataGetter.GetLong())) + ','
+            #struDateTime成交時間
+            yuantaDateTime = dataGetter.GetTYunataDateTime()
+            result += '{0}/{1}/{2} {3}:{4}:{5}'.format(yuantaDateTime.struDate.ushtYear, yuantaDateTime.struDate.bytMon, yuantaDateTime.struDate.bytDay, yuantaDateTime.struTime.bytHour, yuantaDateTime.struTime.bytMin, yuantaDateTime.struTime.bytSec) + ',' 
+            #intFee手續費
+            result += '{0}'.format(str(dataGetter.GetInt())) + ','
+            #abyOrderNo委託單號
+            result +=  dataGetter.GetStr(7)  +','
+            #lngSettlementAMT成交金額
+            result +=  '{0}'.format(str(dataGetter.GetLong())) + ','
+            #abyCurrencyType2交割幣別
+            result +=  dataGetter.GetStr(3)  
+            result +='\r\n'
+
+        #uintCount7國際期貨委託筆數
+        uintOFOrderCount = dataGetter.GetUInt()
+        result += '國外期貨委託筆數:' + str(uintOFOrderCount) + '\r\n' 
+        
+        for _ in range(uintOFOrderCount):
+            #abyAccount期貨帳號
+            result +=  dataGetter.GetStr(22) +','
+            #struTradeYMD交易日
+            yuantaDate = dataGetter.GetTYuantaDate()
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #byMarketNo市場代碼
+            result +=  '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyMarketName市場名稱
+            result +=  dataGetter.GetStr(30) +','
+            #abyCommodityID商品代碼
+            result +=  dataGetter.GetStr(7) +','
+            #intSettlementMonth商品年月
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #abyStkName商品名稱
+            result +=  dataGetter.GetStr(30) +','
+            #abyBuySell買賣別
+            result +=  dataGetter.GetStr(1) +','
+            #abyOrderType委託方式
+            result +=  dataGetter.GetStr(3) +','
+            #abyOdrPrice委託價
+            result +=  dataGetter.GetStr(14) +','
+            #abyTouchPrice停損執行價
+            result +=  dataGetter.GetStr(14) +','
+            #intOrderQty委託口數
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #intMatchQty成交口數
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #shtOrderStatus狀態碼
+            result +=  '{0}'.format(str(dataGetter.GetShort())) + ',' 
+            #struAcceptDate委託日期
+            yuantaDate = dataGetter.GetTYuantaDate()
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #struAcceptTime委託時間
+            yuantaTime = dataGetter.GetTYuantaTime() 
+            result += '{0}:{1}:{2}.{3}'.format(str(yuantaTime.bytHour), str(yuantaTime.bytMin), str(yuantaTime.bytSec), str(yuantaTime.ushtMSec)) + ',' 
+            #abyErrorNo錯誤代碼
+            result +=  dataGetter.GetStr(10) +','
+            #abyErrorMessage錯誤訊息
+            result +=  dataGetter.GetStr(120) +','
+            #abyOrderNo委託書編號
+            result +=  dataGetter.GetStr(8) +','
+            #abyDayTradeID當沖註記
+            result +=  dataGetter.GetStr(1) +','
+            #abyCancelFlag可取消Flag
+            result +=  dataGetter.GetStr(1) +','
+            #abyReduceFlag可減量Flag
+            result +=  dataGetter.GetStr(1) +','
+            #lngUtPrice委託價格整數位
+            result +=  '{0}'.format(str(dataGetter.GetLong())) + ',' 
+            #intUtPrice2委託價格分子
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #intMinPrice2委託價格分母
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #lngUtPrice4停損執行價整數位
+            resultt +=  '{0}'.format(str(dataGetter.GetLong())) + ',' 
+            #intUtPrice5停損執行價格分子
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #intUtPrice6停損執行價格分母
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #abyTraditionFlag傳統單Flag
+            result +=  dataGetter.GetStr(1) +','
+            #abyBasketNo
+            result +=  dataGetter.GetStr(10) +','
+            #byMarketNo1市場代碼1
+            result +=  '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyStkCode1行情股票代碼1
+            result +=   dataGetter.GetStr(12) +','
+            #abyCurrencyType交易幣別
+            result +=   dataGetter.GetStr(3) +','
+            #abyCurrencyType2交割幣別
+            result +=   dataGetter.GetStr(3) 
+            result +='\r\n'
+
+        #uintCount8國際期貨成交筆數
+        uintOFTradeCount = dataGetter.GetUInt()
+        result += '國外期貨成交筆數:' + str(uintOFTradeCount) + '\r\n'
+        
+        for _ in range(uintFutOrderCount):
+            #abyAccount期貨帳號
+            result +=  dataGetter.GetStr(22) +','
+            #byMarketNo市場代碼
+            result +=  '{0}'.format(str(dataGetter.GetByte())) + ',' 
+            #abyMarketName市場名稱
+            result +=  dataGetter.GetStr(30) +','
+            #abyCommodityID商品代碼
+            result +=  dataGetter.GetStr(7) +','
+            #intSettlementMonth商品年月
+            result +=  '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #abyStkName商品名稱
+            result +=  dataGetter.GetStr(30) +','
+            #abyBuySell買賣別
+            result +=  dataGetter.GetStr(1) +','
+            #shtMatchQty成交口數
+            result +=   '{0}'.format(str(dataGetter.GetInt())) + ',' 
+            #abyOdrPrice委託價
+            result +=  dataGetter.GetStr(14) +','
+            #abyMatchPrice成交價
+            result +=  dataGetter.GetStr(14) +','
+            #struMatchDate成交日期
+            yuantaDate = dataGetter.GetTYuantaDate()
+            result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+            #struMatchTime成交時間
+            yuantaTime = dataGetter.GetTYuantaTime() 
+            result += '{0}:{1}:{2}.{3}'.format(str(yuantaTime.bytHour), str(yuantaTime.bytMin), str(yuantaTime.bytSec), str(yuantaTime.ushtMSec)) + ',' 
+            #abyOrderNo委託書編號
+            result +=  dataGetter.GetStr(8) +','
+            #abyCurrencyType交易幣別
+            result +=  dataGetter.GetStr(3) +','
+            #abyCurrencyType2交割幣別
+            result +=  dataGetter.GetStr(3) 
+            result +='\r\n'
+
+        dataGetter.ClearOutputData()
+
+    except Exception as error:
+        result = error
+    #time.sleep(3)
+    return result
+
+#stk_SummaryReport
+#庫存綜合總表 20.103.0.22
+def stk_SummaryReport(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    result = ''
+    
+    try:   
+        #uintCount1現貨庫存筆數
+        count=dataGetter.GetInt()
+        result += '庫存綜合總表筆數:'+ str(count) +',\r\n'
+        
+        for _ in range(count):               
+            #abyAccount帳號
+            result += dataGetter.GetStr(22) + ',' 
+            #shtTradeKind交易種類
+            result += str(dataGetter.GetShort()) + ',' 
+            #byMarketNo市場代碼
+            result += str(dataGetter.GetByte()) + ',' 
+            #abyMarketName市場名稱 
+            result += dataGetter.GetStr(30) + ',' 
+            #abyStkCode股票代號
+            result += dataGetter.GetStr(12) + ',' 
+            #abyStkName股票名稱
+            result += dataGetter.GetStr(30) + ',' 
+            #lngStockNos股數
+            result += str(dataGetter.GetLong()) + ',' 
+            #lngPrice成交均價
+            result += str(dataGetter.GetLong()) + ',' 
+            #lngCost持有成本
+            result += str(dataGetter.GetLong()) + ',' 
+            #lngInterest預估利息
+            result += str(dataGetter.GetLong()) + ',' 
+            #intBuyNotInNos買進未入帳股數
+            result += str(dataGetter.GetInt()) + ',' 
+            #intSellNotInNos賣出未入帳股數
+            result += str(dataGetter.GetInt()) + ',' 
+            #lngCanOrderQty今日可下單股數
+            result += str(dataGetter.GetLong()) + ',' 
+            #lngLoan資保證金/券擔保價品
+            result += str(dataGetter.GetLong()) + ',' 
+            #intTaxRate交易稅率
+            result += str(dataGetter.GetInt()) + ',' 
+            #uintLotSize交易單位 
+            result += str(dataGetter.GetUInt()) + ','   
+            #intMarketPrice市價 
+            result += str(dataGetter.GetInt()) + ','    
+            #shtDecimal小數位數
+            result += str(dataGetter.GetShort()) + ','    
+            #byStkType1屬性1 
+            result += str(dataGetter.GetByte()) + ','   
+            #byStkType2屬性2 
+            result += str(dataGetter.GetByte()) + ','   
+            #intBuyPrice買價  
+            result += str(dataGetter.GetInt()) + ',' 
+            #intSellPrice賣價 
+            result += str(dataGetter.GetInt()) + ','  
+            #intUpStopPrice漲停價
+            result += str(dataGetter.GetInt()) + ','   
+            #intDownStopPrice跌停價 
+            result += str(dataGetter.GetInt()) + ','  
+            #uintPriceMultiplier計價倍數 
+            result += str(dataGetter.GetUInt()) + ','  
+            #abyTradeCurrency報價幣別
+            result += dataGetter.GetStr(3) + ','  
+            #lngCDQTY借貸股數 
+            result += str(dataGetter.GetLong()) + ',' 
+            #lngCanOrderOddQty零股可下單股數 
+            result += str(dataGetter.GetLong())           		
+            result += '\r\n'
+        
+        #uintCount2國外股票庫存筆數
+        #未提供複委託交易故國外股票庫存皆回傳0
+        count=dataGetter.GetInt()
+        result += '國外股票庫存筆數:'+ str(count) +',\r\n'
+        
+        for _ in range(count):               
+            #abyAccount帳號
+            result += dataGetter.GetStr(22) + ',' 
+            #abyCurrencyType幣別
+            result += dataGetter.GetStr(3) + ',' 
+            #byMarketNo市場代碼
+            result += dataGetter.GetStr(1) + ',' 
+            #abyMarketName市場名稱
+            result += dataGetter.GetStr(30) + ','  
+            #abyStkCode股票代號
+            result += dataGetter.GetStr(12) + ',' 
+            #abyStkName股票名稱
+            result += dataGetter.GetStr(30) + ',' 
+            #abyStkFullName股票全名
+            result += dataGetter.GetStr(60) + ',' 
+            #lngStockQty庫存股數
+            result += str(dataGetter.GetLong()) + ',' 
+            #lngTradingQty可交易股數
+            result += str(dataGetter.GetLong()) + ',' 
+            #lngPrice成交均價
+            result += str(dataGetter.GetLong()) + ',' 
+            #lngCost持有成本
+            result += str(dataGetter.GetLong()) + ',' 
+            #intCloseRate匯率
+            result += str(dataGetter.GetInt()) + ',' 
+            #byRateKind匯率運算模式
+            result += dataGetter.GetStr(1) + ',' 
+            #uintLotSize交易單位
+            result += str(dataGetter.GetUInt()) + ',' 
+            #intMarketPrice市價   
+            result += str(dataGetter.GetInt()) + ','    
+            #shtDecimal小數位數
+            result += str(dataGetter.GetShort()) + ','    
+            #intBuyPrice買價
+            result += str(dataGetter.GetInt()) + ','   
+            #intSellPrice賣價
+            result += str(dataGetter.GetInt())             		
+            result += '\r\n'
+            
+    except Exception as error:
+        result = error
+    #time.sleep(3)
+    return result
+
+#fut_SummaryReport
+#期貨庫存總表 20.103.20.13
+def fut_SummaryReport(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    result = ''
+    
+    try:   
+        #uintCount筆數
+        count=dataGetter.GetInt()
+        result += '期貨庫存總表筆數:'+ str(count) +',\r\n'
+        
+        for _ in range(count):               
+            #struFutAccountInfo帳號
+            result += dataGetter.GetStr(22) + ',' 
+            #abyKind委託種類
+            result += dataGetter.GetStr(1) + ',' 
+            #abyTrid商品代碼
+            result += dataGetter.GetStr(21) + ',' 
+            #abyBS買賣別
+            result += dataGetter.GetStr(1) + ',' 
+            #intQty未平倉口數
+            result += str(dataGetter.GetInt()) + ',' 
+            #lngAmt總成交點數
+            result += str(dataGetter.GetLong()) + ',' 
+            #intFee手續費
+            result += str(dataGetter.GetInt()) + ',' 
+            #intTax交易稅
+            result += str(dataGetter.GetInt()) + ','             
+            #abyCurrencyType幣別
+            result += dataGetter.GetStr(3) + ','  
+            #abyDayTradeID當沖註記
+            result += dataGetter.GetStr(1) + ','         
+            #abyCommodityID1商品名稱1
+            result += dataGetter.GetStr(6) + ','  
+            #abyCallPut1買賣權1
+            result += dataGetter.GetStr(1) + ',' 
+            #intSettlementMonth1交易月份1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intStrikePrice1履約價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #abyBS1買賣別1
+            result += dataGetter.GetStr(1) + ','
+            #abyStkName1股票名稱1
+            result += dataGetter.GetStr(20) + ','             
+            #byMarketNo1市場代碼1
+            result += str(dataGetter.GetByte()) + ','             
+            #abyStkCode1行情報價代碼1
+            result += dataGetter.GetStr(12) + ','             
+            #abyCommodityID2商品名稱2
+            result += dataGetter.GetStr(6) + ','              
+            #abyCallPut2買賣權2
+            result += dataGetter.GetStr(1) + ','         
+            #intSettlementMonth2交易月份2
+            result += str(dataGetter.GetInt()) + ',' 
+            #intStrikePrice2履約價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #abyBS2買賣別2
+            result += dataGetter.GetStr(1) + ','
+            #abyStkName2股票名稱2
+            result += dataGetter.GetStr(20) + ','             
+            #byMarketNo2市場代碼2
+            result += str(dataGetter.GetByte()) + ','             
+            #abyStkCode2行情報價代碼2
+            result += dataGetter.GetStr(12) + ','              
+            #intBuyPrice1買入價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intSellPrice1賣出價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intMarketPrice1市價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intBuyPrice2買入價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #intSellPrice2賣出價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #intMarketPrice2市價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #shtDecimal小數位數
+            result += str(dataGetter.GetShort()) + ',' 
+            #abyProductType1商品類別1
+            result += dataGetter.GetStr(1) + ','
+            #abyProductKind1商品屬性1
+            result += dataGetter.GetStr(1) + ','
+            #abyProductType2商品類別2
+            result += dataGetter.GetStr(1) + ',' 
+            #abyProductKind2商品屬性2
+            result += dataGetter.GetStr(1) + ','
+            #intUpStopPrice1漲停價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intDownStopPrice1跌停價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intUpStopPrice2漲停價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #intDownStopPrice2跌停價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #abyStkCode1opp行情股票代碼1反向
+            result += dataGetter.GetStr(12) + ','             
+            #abyStkCode2opp行情股票代碼2反向
+            result += dataGetter.GetStr(12)                       		
+            result += '\r\n'
+            
+    except Exception as error:
+        result = error
+    #time.sleep(3)
+    return result
+
+#OVfut_SummaryReport
+#國際期貨庫存總表 20.103.40.18
+def OVfut_SummaryReport(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    result = ''
+    
+    try:   
+        #uintCount筆數
+        count=dataGetter.GetInt()
+        result += '國際期貨庫存總表筆數:'+ str(count) +',\r\n'
+        
+        for _ in range(count):               
+            #struFutAccountInfo帳號
+            result += dataGetter.GetStr(22) + ',' 
+            #abyKind委託種類
+            result += dataGetter.GetStr(1) + ','
+            #abyTrid商品代碼
+            result += dataGetter.GetStr(20) + ',' 
+            #abyBS買賣別
+            result += dataGetter.GetStr(1) + ',' 
+            #intQty未平倉口數
+            result += str(dataGetter.GetInt()) + ',' 
+            #lngAmt總成交點數
+            result += str(dataGetter.GetLong()) + ',' 
+            #abyCommodityID1商品名稱1
+            result += dataGetter.GetStr(6) + ','              
+            #abyCallPut1買賣權1
+            result += dataGetter.GetStr(1) + ','   
+            #intSettlementMonth1交易月份1
+            result += str(dataGetter.GetInt()) + ',' 
+            #abyProductCName1商品中文名稱1
+            result += dataGetter.GetStr(18) + ','                
+            #intStrikePrice1履約價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #abyCommodityID2商品名稱2
+            result += dataGetter.GetStr(6) + ','              
+            #abyCallPut2買賣權2
+            result += dataGetter.GetStr(1) + ','                 
+            #intSettlementMonth2交易月份2
+            result += str(dataGetter.GetInt()) + ',' 
+            #abyProductCName2商品中文名稱2
+            result += dataGetter.GetStr(18) + ','  
+            #intStrikePrice2履約價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #intFee手續費
+            result += str(dataGetter.GetInt()) + ',' 
+            #abyCurrencyType幣別
+            result += dataGetter.GetStr(3) + ','  
+            #abyDayTradeID當沖註記
+            result += dataGetter.GetStr(1) + ','             
+            #abyBS1買賣別1
+            result += dataGetter.GetStr(1) + ',' 
+            #abyBS2買賣別2
+            result += dataGetter.GetStr(1) + ',' 
+            #abyOptProdKind1選擇權商品種類1
+            result += dataGetter.GetStr(1) + ','
+            #abyOptProdKind2選擇權商品種類2
+            result += dataGetter.GetStr(1) + ','           
+            #byMarketNo1市場代碼1
+            result += str(dataGetter.GetByte()) + ','             
+            #abyStkCode1行情股票代碼1
+            result += dataGetter.GetStr(12) + ','    
+            #byMarketNo2市場代碼2
+            result += str(dataGetter.GetByte()) + ','             
+            #abyStkCode2行情股票代碼2
+            result += dataGetter.GetStr(12) + ','                       
+            #intBuyPrice1買入價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intSellPrice1賣出價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intMarketPrice1市價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intBuyPrice2買入價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #intSellPrice2賣出價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #intMarketPrice2市價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #shtDecimal小數位數
+            result += str(dataGetter.GetShort()) + ',' 
+            #uintTickDiff檔差
+            result += str(dataGetter.GetInt())
+            result += '\r\n'
+            
+    except Exception as error:
+        result = error
+    #time.sleep(3)
+    return result
+
+#FutInterestStoreReport
+#簡易權益數庫存 20.104.20.20
+def FutInterestStoreReport(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    result = ''
+
+    try:
+        result += '簡易權益數:\r\n'
+        #shtReplyCode委託結果代碼
+        result += str(dataGetter.GetShort()) + ','
+        #abyAdvisory錯誤說明
+        result += dataGetter.GetStr(78) + ','    
+        #abyType型態
+        result += dataGetter.GetStr(1) + ','  
+        #abyCurrency幣別
+        result += dataGetter.GetStr(3) + ','  
+        #lngEquity權益數
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngAllFullIm全額原始保證金
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngCanuseMargin可運用保證金
+        result += str(dataGetter.GetLong()) + ',' 
+        #abyRiskRate權益比率
+        result += dataGetter.GetStr(9) + ','  
+        #abyDaytradeRisk當沖風險指標
+        result += dataGetter.GetStr(9) + ','
+        #abyAllRiskRate風險指標
+        result += dataGetter.GetStr(9) + ','  
+        #lngCashForward前日餘額
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngOpenGlYes昨日未平倉損益
+        result += str(dataGetter.GetLong()) + ',' 
+        #strucUpdateTime風險更新時間
+        yuantaDateTime = dataGetter.GetTYunataDateTime() 
+        result += '{0}/{1}/{2} {3}:{4}:{5}.{6}'.format(yuantaDateTime.struDate.ushtYear, yuantaDateTime.struDate.bytMon, yuantaDateTime.struDate.bytDay, yuantaDateTime.struTime.bytHour, yuantaDateTime.struTime.bytMin, yuantaDateTime.struTime.bytSec, yuantaDateTime.struTime.ushtMSec) + ','           
+        #lngAccounting存/提
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngFloatMargin未沖銷期貨浮動損益
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngFloatPremium未沖銷買方選擇權市值 + 未沖銷賣方選擇權市值
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngCommissionAll手續費    
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngTotalValue權益總值 
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngTaxRate期交稅
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngAllIm原始保證金
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngCallMargin追繳保證金
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngGrantal本日期貨平倉損益淨額 + 到期履約損益
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngAllMm維持保證金
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngOrderIm委託保證金
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngPremium權利金收入與支出
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngOrderPremium委託權利金
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngBalance本日餘額
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngCanusePremium可動用(出金)保證金(含抵委)
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngCoveredOim委託抵繳保證金
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngBondAmt債券實物交割款
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngNobondAmt債券實物不足交割款
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngBondMargin債券待交割保證金
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngCoveredIm有價證券抵繳總額
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngReduceIm期貨多空減收保證金
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngIncreaseIm加收保證金
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngYTotalValue昨日權益總值
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngRate匯率
+        result += str(dataGetter.GetLong()) + ',' 
+        #abyBestFlag客戶保證金計收方式
+        result += str(dataGetter.GetByte()) + ','
+        #lngGlToday本日損益
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngDspEquity風險權益總值
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngDspFloatmargin未沖銷期貨風險浮動損益
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngDspFloatpremium未沖銷買方選擇權風險市值+未沖銷賣方選擇權風險市值
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngDspIM風險原始保證金
+        result += str(dataGetter.GetLong()) + ',' 
+        #lngDspRiskRate盤後風險指標
+        result += str(dataGetter.GetLong())
+        result += '\r\n'
+
+        #uintCount筆數
+        count=dataGetter.GetInt()
+        result += '簡易庫存筆數:'+ str(count) +',\r\n'
+
+        for _ in range(count):               
+            #struFutAccountInfo帳號
+            result += dataGetter.GetStr(22) + ',' 
+            #abyKind期權別
+            result += dataGetter.GetStr(3) + ',' 
+            #abyTrid商品代碼
+            result += dataGetter.GetStr(21) + ',' 
+            #abyID1商品組合代碼-單腳1
+            result += dataGetter.GetStr(12) + ','                
+            #abyCommodityID1商品名稱1
+            result += dataGetter.GetStr(6) + ','              
+            #intSettlementMonth1商品月份1
+            result += str(dataGetter.GetInt()) + ',' 
+            #abyCP1買賣權
+            result += dataGetter.GetStr(1) + ','   
+            #intStrikePrice1履約價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intNetLotsB1留倉總買1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intNetLotsS1留倉總賣1
+            result += str(dataGetter.GetInt()) + ',' 
+            #byMarketNo1市場代碼1
+            result += str(dataGetter.GetByte()) + ','             
+            #abyStkCode1行情報價代碼1
+            result += dataGetter.GetStr(12) + ','    
+            #abyStkName1股票名稱1
+            result += dataGetter.GetStr(20) + ','                
+            #shtDecimal1小數位數1
+            result += str(dataGetter.GetShort()) + ',' 
+            #intBuyPrice1買入價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intSellPrice1賣出價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #intMarketPrice1市價1
+            result += str(dataGetter.GetInt()) + ',' 
+            #abyID2商品組合代碼-單腳2
+            result += dataGetter.GetStr(12) + ','                
+            #abyCommodityID2商品代碼2
+            result += dataGetter.GetStr(6) + ','              
+            #intSettlementMonth2商品月份2
+            result += str(dataGetter.GetInt()) + ',' 
+            #abyCP2買賣權2
+            result += dataGetter.GetStr(1) + ','     
+            #intStrikePrice2履約價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #intNetLotsB2留倉總買2
+            result += str(dataGetter.GetInt()) + ',' 
+            #intNetLotsS2留倉總賣2
+            result += str(dataGetter.GetInt()) + ',' 
+            #byMarketNo2市場代碼2
+            result += str(dataGetter.GetByte()) + ','             
+            #abyStkCode2行情報價代碼2
+            result += dataGetter.GetStr(12) + ','    
+            #abyStkName2股票名稱2
+            result += dataGetter.GetStr(20) + ','                
+            #shtDecimal2小數位數2
+            result += str(dataGetter.GetShort()) + ',' 
+            #intBuyPrice2買入價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #intSellPrice2賣出價2
+            result += str(dataGetter.GetInt()) + ',' 
+            #intMarketPrice2市價2
+            result += str(dataGetter.GetInt())
+            result += '\r\n'
+
+    except Exception as error:
+        result = error
+    #time.sleep(3)
+    return result
+
+#FutDepositOptimumReport
+#期貨保證金最佳化查詢20.104.20.17
+def FutDepositOptimumReport(abyData):
+    result = ''
+    
+    try:
+        global DOLList
+        DOLList = abyData    
+        count=len(DOLList)
+        result += '期貨保證金最佳化筆數:'+ str(count) +'\r\n'
+        for i in range(count):
+            depositOptimum=DOLList[i]
+            #策略ID
+            result +=str(depositOptimum.byStrategyID)+ ','
+            #期貨帳號
+            result +=depositOptimum.struFutAccountInfo+ ','
+            #口數
+            result +=str(depositOptimum.shtQty)+ ','
+            #買賣別1
+            result +=depositOptimum.abyBuySell1+ ','
+            #買賣別2
+            result +=depositOptimum.abyBuySell2+ ','
+            #成交價1
+            result +=str(depositOptimum.intDealPrice1)+ ','
+            #成交價2
+            result +=str(depositOptimum.intDealPrice2)+ ','
+            #小數位數1
+            result +=str(depositOptimum.shtDecimal1)+ ','
+            #商品一保證金
+            result +=str(depositOptimum.intCurrentIM1)+ ','
+            #商品二保證金
+            result +=str(depositOptimum.intCurrentIM2)+ ','
+            #可節省保證金
+            result +=str(depositOptimum.intSaveIM)+ ','
+            #商品ID1
+            result +=depositOptimum.abyCommodityID1+ ','
+            #買賣權1
+            result +=depositOptimum.abyCallPut1+ ','
+            #商品年月1
+            result +=str(depositOptimum.intSettlementMonth1)+ ','
+            #履約價1
+            result +=str(depositOptimum.intStrikePrice1)+ ','
+            #股票名稱1
+            result +=depositOptimum.abyStkName1+ ','
+            #商品ID2
+            result +=depositOptimum.abyCommodityID2+ ','
+            #買賣權2
+            result +=depositOptimum.abyCallPut2+ ','
+            #商品年月2
+            result +=str(depositOptimum.intSettlementMonth2)+ ','
+            #履約價2
+            result +=str(depositOptimum.intStrikePrice2)+ ','
+            #股票名稱2
+            result +=depositOptimum.abyStkName2
+            result += '\r\n'
+        
+    except Exception as error:
+        result = error
+    #time.sleep(3)
+    return result
+
+#FutCombined_order_out_response
+#期貨複式單組合30.100.20.14
+def FutCombined_order_out_response(abyData):
+    result = ''
+    
+    try:
+        orderStatus=OrderStatus()
+        orderStatus=abyData
+        result += '期貨複式單組合:'
+        #訊息代碼
+        result +=orderStatus.ResultCount.MsgCode+ ','
+        #訊息內容
+        result +=orderStatus.ResultCount.MsgContent+ ','
+        #筆數
+        count=orderStatus.ResultCount.Count
+        result +=str(count)+'筆\r\n'
+        
+        for i in range(count):
+            OrderResultMesg=orderStatus.orderResult[i]
+            #識別碼
+            result +=str(OrderResultMesg.Identify)+ ','
+            #委託結果代碼
+            result +=str(OrderResultMesg.ReplyCode)+ ','
+            #錯誤類別
+            result +=OrderResultMesg.ErrType+ ','
+            #錯誤代號
+            result +=OrderResultMesg.ErrNO+ ','
+            #錯誤說明
+            result +=OrderResultMesg.Advisory+ ','
+            result += '\r\n'
+        
+    except Exception as error:
+        result = error
+    #time.sleep(3)
+    return result
+
+
+#stk_order_real_report
+#即時回報 200.10.10.26
+def stk_order_real_report(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    result = ''
+    
+    try:
+        result += '即時回報:\r\n'
+		#abyAccount帳號
+        result += dataGetter.GetStr(22) + ',' 
+		#bytRptType回報類別50/51
+        result += '回報類別:' + dataGetter.GetStr(1) + ',' 
+		#abyOrderNo委託單號
+        result += '委託單號:' + dataGetter.GetStr(20) + ','
+        #byMarketNo市場代碼		
+        result += '市場代碼:' + dataGetter.GetStr(1) + ',' 
+		#abyCompanyNo商品代碼
+        result += '商品代碼:' + dataGetter.GetStr(20) + ',' 
+		#abyStkCName股票名稱
+        result += '股票名稱:' + dataGetter.GetStr(20) + ','
+        #struOrderDate交易日
+        yuantaDate = dataGetter.GetTYuantaDate() 
+        result += '{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+		#struOrderTime交易時間
+        yuantaTime = dataGetter.GetTYuantaTime() 
+        result += '{0}:{1}:{2}.{3}'.format(str(yuantaTime.bytHour), str(yuantaTime.bytMin), str(yuantaTime.bytSec), str(yuantaTime.ushtMSec)) + ',' 
+		#abyOrderType委託種類 0:現貨
+        result += '現貨:' + dataGetter.GetStr(3) + ',' 
+		#abyBS買賣別
+        buySell = dataGetter.GetStr(1) 
+        result += '買賣別:' + buySell + ',' 
+		#abyPrice價格
+        result += 'price:' + dataGetter.GetStr(14) + ',' 
+		#abyTouchPrice停損執行價(未使用欄位)
+        dataGetter.GetStr(14) + ',' 
+		#intBeforeQty改量前數量
+        result += ' 改量前:{0}'.format(str(dataGetter.GetInt())) + ','
+        #intOrderQty數量		
+        result += '數量:{0}'.format(str(dataGetter.GetInt())) + '股,' 
+		#abyOpenOffsetKind期權沖(未使用欄位)
+        dataGetter.GetStr(1) + ',' 
+		#abyDayTrade當沖記號 '' or X:現股當沖註記 
+        result += '當沖記號:' + dataGetter.GetStr(1) + ',' 
+		#abyOrderCond委託效期 0:ROD (預設) 3:IOC  4:FOK
+        result += '委託效期:' + dataGetter.GetStr(1) + ',' 
+		#abyOrderErrorNo錯誤碼
+        result += '錯誤碼:' + dataGetter.GetStr(4) + ','  
+		#bytTradeKind交易性質 1:買 2: 賣 3:改量  4:取消 5:查詢 6:改價 9:交易所主動刪單
+        result += '交易性質:' + dataGetter.GetStr(1) + ','  
+		#byAPCode委託類別 0:現股,2:零股,4:盤中零股,7:盤後,99:興櫃
+        result += '委託類別:' + dataGetter.GetStr(1) + ',' 
+		# YuantaOneAPI未使用欄位(52)
+        #(abyBasketNo32/byOrderStatus/byStkType1/byStkType2/byBelongMarketNo/abyBelongStkCode/uintSeqNo)
+        dataGetter.GetStr(52) 
+		#abyPriceType價格型態 
+        result += '價格型態:' + dataGetter.GetStr(1) + ',' 
+		#abyStkErrCode證券回報錯誤碼
+        result_ErrCode = dataGetter.GetStr(5)
+        result +=  '證券回報錯誤碼:' + result_ErrCode
+        result += '\r\n'
+        
+    except Exception as error:
+        result = error
+    #time.sleep(3)
+    return result
+
+#stk_order_real_reportMerge
+#即時回報彙總 200.10.10.27 
+def stk_order_real_reportMerge(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    result = ''
+    
+    try:
+        result += '即時回報彙總:\r\n'
+		#abyAccount帳號
+        result += dataGetter.GetStr(22) + ',' 
+		#bytRptFlag回報標記
+        result += '回報標記:'+'{0}'.format(str(dataGetter.GetByte()))  + ',' 
+		#abyOrderNo委託單號
+        result += '委託單號:'+dataGetter.GetStr(20) + ','
+        #byMarketNo市場代碼		
+        result += '市場代碼:'+'{0}'.format(str(dataGetter.GetByte()))   + ',' 
+		#abyCompanyNo商品代碼
+        result += '商品代碼:'+dataGetter.GetStr(20) + ',' 
+        #struOrderDate交易日期		
+        yuantaDate = dataGetter.GetTYuantaDate() 
+        result += '交易日期:'+'{0}/{1}/{2}'.format(yuantaDate.ushtYear, yuantaDate.bytMon, yuantaDate.bytDay) + ','
+		#struOrderTime交易時間
+        yuantaTime = dataGetter.GetTYuantaTime() 
+        result += '交易時間:'+'{0}:{1}:{2}.{3}'.format(str(yuantaTime.bytHour), str(yuantaTime.bytMin), str(yuantaTime.bytSec), str(yuantaTime.ushtMSec)) + ','
+		#abyOrderType委託種類 0:現貨
+        result += '委託種類:'+ dataGetter.GetStr(3) + ',' 
+		#abyBS買賣別
+        result += '買賣別:'+ dataGetter.GetStr(1)  + ',' 
+		#abyOrderPrice委託價
+        result +=  '委託價:'+ dataGetter.GetStr(14) + ',' 
+		#abyTouchPrice停損執行價
+        result +=  '停損執行價:'+ dataGetter.GetStr(14) + ',' 
+		#abyLastDealPrice最後成交價
+        result +=  '最後成交價:'+ dataGetter.GetStr(14) + ',' 
+        #abyAvgDealPrice平均成交價
+        result +=  '平均成交價:'+ dataGetter.GetStr(14) + ',' 
+        #intBeforeQty改量前數量
+        result += '改量前數量:'+'{0}'.format(str(dataGetter.GetInt()))   + ',' 
+        #intOrderQty委託股數
+        result += '委託股數:'+'{0}'.format(str(dataGetter.GetInt()))   + ',' 
+        #intOkQty成交股數
+        result += '成交股數:'+'{0}'.format(str(dataGetter.GetInt()))   + ',' 
+		#abyOpenOffsetKind新增/沖銷別
+        result +=  '新增/沖銷別:'+ dataGetter.GetStr(1) + ',' 
+		#abyDayTrade當沖記號 '' or X:現股當沖註記 
+        result +=  '當沖記號:'+ dataGetter.GetStr(1) + ',' 
+		#abyOrderCond委託條件 
+        result +=  '委託條件:'+ dataGetter.GetStr(1) + ',' 
+		#abyOrderErrorNo錯誤碼
+        result +=  '錯誤碼:'+ dataGetter.GetStr(4) + ','  
+		#byAPCode委託類別 0:現股,2:零股,4:盤中零股,7:盤後,99:興櫃
+        result += '委託類別:'+'{0}'.format(str(dataGetter.GetByte()))   + ',' 
+		#shtOrderStatus狀態碼
+        result += '狀態碼:'+'{0}'.format(str(dataGetter.GetShort()))   + ','
+        #byLastOrderStatus最新一筆即回資料狀態
+        result += '資料狀態:'+'{0}'.format(str(dataGetter.GetByte()))   + ',' 
+        #abyCompanyName股票名稱
+        result += '股票名稱:'+ dataGetter.GetStr(20) + ','  
+        #abyTradeCode實體交易代碼
+        result += '實體交易代碼:'+ dataGetter.GetStr(20) + ','  
+        #dwStrikePrice履約價
+        result += '履約價:'+'{0}'.format(str(dataGetter.GetUInt()))   + ','
+        #abyBasketNo32一籃子下單編號
+        result +=  '一籃子下單編號:'+ dataGetter.GetStr(32) + ','  
+        #byStkType1屬性1
+        result += '屬性1:'+'{0}'.format(str(dataGetter.GetByte()))   + ',' 
+        #byStkType2屬性2
+        result += '屬性2:'+'{0}'.format(str(dataGetter.GetByte()))   + ',' 
+        #byBelongMarketNo所屬市場代碼
+        result += '所屬市場代碼:'+'{0}'.format(str(dataGetter.GetByte()))   + ',' 
+        #abyBelongStkCode所屬股票代碼
+        result += '所屬股票代碼:'+ dataGetter.GetStr(12) + ','  
+		#PriceType價格型態 
+        result += '價格型態:'+ dataGetter.GetStr(1) + ',' 
+		#abyStkErrCode證券回報錯誤碼
+        result +=  '證券回報錯誤碼'+ dataGetter.GetStr(5) 
+        result += '\r\n'
+        
+    except Exception as error:
+        result = error
+    #time.sleep(3)
+    return result
+
+# WatchlistAll_response - 已按 readme.md 實現字典格式保存和異步 CSV 寫入
+# 每 5 秒完整保存一筆資料：時間、成交股數、成交金額、開盤價、最高價、最低價、收盤價、漲跌價差、成交筆數
+#WatchlistAll_response
+#訂閱報價表 98.10.70.10
+def SubscribeWatclistAll_Out(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    result = ''
+    result += 'WatchlistALL報價表訂閱結果:\r\n';
+    byTemp=''    
+    
+    try:
+        
+
+        abyKey = dataGetter.GetStr(22)
+        market_no = dataGetter.GetByte()
+        stock_id = dataGetter.GetStr(12)
+        seq_no = dataGetter.GetLong()
+        byTemp = str(dataGetter.GetByte())
+        state = get_quote_state(stock_id, market_no)
+        state.byIndexFlag = byTemp
+
+        if byTemp == '22':
+            buy_vol = dataGetter.GetInt()
+            sell_vol = dataGetter.GetInt()
+            # 最佳買賣量 (不覆蓋五檔陣列，五檔資料更完整)
+            state.last_update = time.time()
+            state.latest_timestamp = state.last_update
+            result += f"WatchlistAll {stock_id} 22: buy_vol={buy_vol}, sell_vol={sell_vol}\r\n"
+        elif byTemp == '28':
+            buy_price = dataGetter.GetInt()
+            sell_price = dataGetter.GetInt()
+            # 最佳買賣價 (不覆蓋五檔陣列，五檔資料更完整)
+            state.last_update = time.time()
+            state.latest_timestamp = state.last_update
+            result += f"WatchlistAll {stock_id} 28: buy_price={buy_price}, sell_price={sell_price}\r\n"
+        elif byTemp == '29':
+            yuantaTime = dataGetter.GetTYuantaTime()
+            timestamp = dt.datetime.now().replace(
+                hour=yuantaTime.bytHour,
+                minute=yuantaTime.bytMin,
+                second=yuantaTime.bytSec,
+                microsecond=yuantaTime.ushtMSec * 1000
+            ).timestamp()
+            total_out = to_uint32(dataGetter.GetInt())
+            total_in = to_uint32(dataGetter.GetInt())
+            deal_price = dataGetter.GetInt()
+            deal_vol = to_uint32(dataGetter.GetInt())
+            total_vol = to_uint32(dataGetter.GetInt())
+            total_amt = to_uint32(dataGetter.GetInt()) #dataGetter.GetLong()會 Exception或可用format(str(dataGetter.GetLong()))
+            state.update_watchlist_all(byTemp, timestamp=timestamp, total_out=total_out, total_in=total_in, deal_price=deal_price, deal_volume=deal_vol)
+            # 使用 API 回傳的累積總量，值單位為「張」需 ×1000→股
+            # 使用 max() 保留較大值：盤中重啟後 API 從零開始，CSV 復原值較大
+            state.total_in_volume = max(state.total_in_volume, total_in * 1000)
+            state.total_out_volume = max(state.total_out_volume, total_out * 1000)
+            state.total_volume = max(state.total_volume, total_vol * 1000)
+            state.extra_data['total_vol'] = total_vol
+            state.extra_data['total_amt'] = total_amt
+            result += f"WatchlistAll {stock_id} 29: out={total_out}, in={total_in}, deal={deal_price}@{deal_vol}, total_vol={total_vol}, total_amt={total_amt}\r\n"
+        else:
+            result += f"WatchlistAll {stock_id} unknown index {byTemp}\r\n"
+    except Exception as error:
+        result = error
+    #time.sleep(3)
+    display_data = state.to_display_dict() if 'state' in locals() else {}
+    if display_data:
+        print(f"\n[{dt.datetime.now()}]SubscribWatchlistAll {stock_id} 解析結果: {display_data} market_no={market_no} res:{result}")
+    time.sleep(1)
+    
+    return display_data
+
+
+dtsFiveTickOrder ={
+    'abyKey':1, 
+    'byMarketNo':50,       
+    'stock_id':2317,
+    'FiveTickOrder': [2265000,2260000,2255000,2250000,2245000,347,214,108,103,324,2270000,2275000,2280000,2285000,2290000,302,240,632,340,564],
+    'ticket': time.time() #当前时间戳time.asctime(time.localtime(ticket)), time.strftime("%Y%m%d %H:%M:%S", time.localtime())
+    }
+#讀取key已知key的values like dts.get(key)
+#print(dtsFiveTickOrde)
+
+#FiveTick_response - 已按 readme.md 實現統一字典格式保存
+#訂閱五檔報價 210.10.60.10
+def SubscribeFiveTick_out(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    try:        
+        #abyKey訂閱識別碼
+        abyKey = dataGetter.GetStr(22)
+        #byMarketNo市場代碼
+        market_no = dataGetter.GetByte()
+        stock_id = dataGetter.GetStr(12)
+        
+        byIndexFlag = str(dataGetter.GetByte())
+        state = get_quote_state(stock_id, market_no)
+        state.byIndexFlag = byIndexFlag
+
+        buy_prices = []
+        buy_volumes = []
+        sell_prices = []
+        sell_volumes = []
+
+        if byIndexFlag in ('50', '51'):
+            # API 欄位順序: 買價1-5, 買量1-5, 賣價1-5, 賣量1-5 (與 IronPython 一致)
+            for _ in range(5):
+                buy_prices.append(dataGetter.GetInt())
+            for _ in range(5):
+                buy_volumes.append(dataGetter.GetInt())
+            for _ in range(5):
+                sell_prices.append(dataGetter.GetInt())
+            for _ in range(5):
+                sell_volumes.append(dataGetter.GetInt())
+
+            state.update_five_tick(byIndexFlag, buy_prices, buy_volumes, sell_prices, sell_volumes)
+        else:
+            # 未知的五檔索引，仍保存基本欄位
+            state.last_update = time.time()
+            state.latest_timestamp = state.last_update
+
+        raw_length = len(abyData) if hasattr(abyData, '__len__') else None
+        print(f"[{dt.datetime.now()}] SubscribeFiveTick_out stock_id={stock_id} raw_len={raw_length} byIndexFlag={byIndexFlag} buy_prices={buy_prices} buy_volumes={buy_volumes} sell_prices={sell_prices} sell_volumes={sell_volumes}")
+        display_data = state.to_display_dict()
+        if display_data:
+            print(f"\nFiveTick {stock_id} 解析結果: {display_data}")
+        else:
+            print(f"[{dt.datetime.now()}] SubscribeFiveTick_out {stock_id} 無有效 display_data")
+        return display_data
+
+    except Exception as error:
+        print(f'SubscribeFiveTick_out error: {error}')
+        return {}
+
+#Watchlist_response
+#訂閱報價表指定欄位 210.10.70.11
+def SubscribeWatchlist_Out(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    result = ''
+    result += 'WatchList指定欄位訂閱結果:\r\n'
+    
+    try:
+        dataGetter.GetStr(22)
+        market_no = dataGetter.GetByte()
+        stock_id = dataGetter.GetStr(12)
+        byIndexFlag = '{0}'.format(dataGetter.GetByte())
+        int_value = to_uint32(dataGetter.GetInt())
+
+        state = get_quote_state(stock_id, market_no)
+        state.update_watchlist_field(byIndexFlag, int_value)
+
+        display_data = state.to_display_dict()
+        if display_data:
+            print(f"\nWatchList {stock_id} 指定欄位訂閱結果: {display_data}")
+        return display_data
+    except Exception as error:
+        print(f'SubscribeWatchlist_Out error: {error}')
+        return {}
+
+#StockTick_response
+#訂閱個股分時明細結果 210.10.40.10
+def SubscribeStocktick_out(abyData):
+    dataGetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataGetter.OutMsgLoad(abyData)
+    
+    result = ''
+    result += '分時明細訂閱結果:\r\n'    
+    try:
+        raw_length = len(abyData) if hasattr(abyData, '__len__') else None
+        dataGetter.GetStr(22)
+        market_no = dataGetter.GetByte()
+        stock_id = dataGetter.GetStr(12)
+        seq_no = dataGetter.GetInt()
+        yuantaTime = dataGetter.GetTYuantaTime()
+        deal_time = dt.datetime.now().replace(
+            hour=yuantaTime.bytHour,
+            minute=yuantaTime.bytMin,
+            second=yuantaTime.bytSec,
+            microsecond=yuantaTime.ushtMSec * 1000
+        ).timestamp()
+        buy_price = dataGetter.GetInt()
+        sell_price = dataGetter.GetInt()
+        deal_price = dataGetter.GetInt()
+        deal_volume = to_uint32(dataGetter.GetInt())
+        in_out_flag = str(dataGetter.GetByte())
+        detail_type = str(dataGetter.GetByte())
+        state = get_quote_state(stock_id, market_no)
+        state.update_stocktick(deal_price=deal_price, deal_volume=deal_volume, in_out_flag=in_out_flag, timestamp=deal_time)
+        result += f"StockTick {stock_id}: raw_len={raw_length} deal={deal_price}@{deal_volume}, in_out={in_out_flag}, type={detail_type}\r\n"
+    except Exception as error:
+        result = error
+    display_data = state.to_display_dict() if 'state' in locals() else {}
+    if display_data:
+        print(f"\nStockTick {stock_id} 解析結果: {display_data}")
+    return display_data
+# 訂閱回應資訊統一字典格式 - 已按 readme.md 實現
+# 所有 intMark == 2 訂閱回應現在統一更新到 SUBSCRIPTION_STATE['stocks']，
+# 由 show() 異步顯示並每 5 秒寫入 CSV。
+# OnResponse
+def objApi_OnResponse(intMark, dwIndex, strIndex, objHandle, objValue):
+    result = ''
+	# 系統回應資訊
+    if intMark == 0: 
+        result = str(objValue)
+	# 查詢(RQ/RP)回應資訊
+    elif intMark == 1: 
+        
+	    #Login登入
+        if strIndex == 'Login':
+            ptr = SocketState.SharePtr("CONNECT_LOGIN", EnumLoginStatusType.CONNECT_LOGIN)
+            if(ptr.name == "CONNECT_LOGIN"):
+                ptr.AckStatus(EnumLoginStatusType.CONNECT_LOGIN.name,EnumLoginStatusType.LOGIN_SUCCESS)
+                print("AckStatus LOGIN_SUCCESS")            
+                result = login_out_response(objValue)
+                print(f"登入成功 = { result.index('登入成功') } ")
+
+        #取得己訂閱報價商品列表    
+        elif strIndex == 'GetQuoteList':
+            result = GetQuoteList_Out(objValue)       
+        #逐筆即時回報彙總
+        elif strIndex == '10.0.0.16':  
+            result = get_real_report_merge_response(objValue)
+        #逐筆即時回報
+        elif strIndex == '10.0.0.20': 
+            result = get_real_report_response(objValue)            
+		#Order現貨下單	
+        elif strIndex == '30.100.10.31':
+            result = stk_order_out_response(objValue)
+        #futureorder期貨下單
+        elif strIndex == '30.100.20.24': 
+            result = future_order_out_response(objValue)
+        #OVFutureorder國際期貨下單
+        elif strIndex == '30.100.40.12':
+            result = OVFuture_order_out_response(objValue)
+        #OrderTradeReport委託成交綜合回報	
+        elif strIndex == '20.101.0.18':
+            result = stk_OrderTradeReport(objValue)
+		#SummaryReport現貨庫存綜合總表	
+        elif strIndex == '20.103.0.22':
+            result = stk_SummaryReport(objValue)
+		#FutStoreSummaryReport期貨庫存總表	
+        elif strIndex == '20.103.20.13':
+            result = fut_SummaryReport(objValue)
+		#OVFutStoreSummaryReport國際期貨庫存總表	
+        elif strIndex == '20.103.40.18':
+            result = OVfut_SummaryReport(objValue)            
+        #ReadWatchListAll讀取報價表
+        elif strIndex == '50.0.0.16':            
+            result = ReadWatchListAll_Out(objValue)
+        #FutInterestStore期貨簡易權益數庫存查詢
+        elif strIndex == '20.104.20.20':
+            result = FutInterestStoreReport(objValue)
+        #FutDepositOptimum期貨保證金最佳化查詢
+        elif strIndex == '20.104.20.17':
+            result = FutDepositOptimumReport(objValue)
+        #OrderFutCombined期貨複式單組合
+        elif strIndex == '30.100.20.14':
+            result = FutCombined_order_out_response(objValue)
+        else:
+            if (strIndex == ''):
+                result = str(objValue)
+            else:
+                result ='{0},{1}'.Format(strIndex, objValue)
+	# 訂閱回應資訊		
+    elif intMark == 2:
+        ptr = SocketState.SharePtr("CONNECT_LOGIN", EnumLoginStatusType.CONNECT_LOGIN)
+        print(f"[{dt.datetime.now()}] OnResponse intMark=2 strIndex={strIndex} cli={cli}")
+        SUBSCRIPTION_STATE['event_counts'][strIndex] = SUBSCRIPTION_STATE['event_counts'].get(strIndex, 0) + 1
+        #RealReport即時回報資料
+        if strIndex == '200.10.10.26': 	
+            result = stk_order_real_report(objValue)
+        #RealReportMerge逐筆即時回報彙總    
+        elif strIndex == '200.10.10.27': 	
+            result = stk_order_real_reportMerge(objValue)
+        #Watchlist報價表(指定欄位)        
+        elif strIndex == '210.10.70.11':           
+            if ptr.isAckStatus(EnumLoginStatusType.REQ_Watchlist.name):
+                print(f"REQ_Watchlist IN")
+                result = SubscribeWatchlist_Out(objValue)
+                ptr.setStatus(EnumLoginStatusType.ACK_Watchlist)
+                print(f"ACK_Watchlist out")
+            else:
+                print("ACK_Watchlist received but socket type mismatch")
+                
+        #WatchlistAll報價表
+        elif strIndex == '98.10.70.10':
+            if ptr.isAckStatus(EnumLoginStatusType.REQ_WatchlistAll.name):
+                result = SubscribeWatclistAll_Out(objValue)
+                ptr.setStatus(EnumLoginStatusType.ACK_WatchlistAll)
+                print(f"ACK_WatchlistAll out:{result}")
+        #StockTick分時明細        
+        elif strIndex == '210.10.40.10':
+            if ptr.isAckStatus(
+                EnumLoginStatusType.REQ_StockTick.name):
+                print ("REQ_StockTick in")
+                result = SubscribeStocktick_out(objValue) 
+                print(f"ACK_StockTick received – state updated:{result}")
+                ptr.setStatus(EnumLoginStatusType.ACK_StockTick)
+            else:
+                print("ACK_StockTick received but socket type mismatch\n")
+            
+        #FiveTick五檔報價
+        elif strIndex == '210.10.60.10':
+            if ptr.isAckStatus(EnumLoginStatusType.REQ_FiveTickA.name):
+               
+                print (f"ACK_FiveTickA in")
+                result = SubscribeFiveTick_out(objValue) 
+                ptr.setStatus(EnumLoginStatusType.ACK_FiveTickA)
+                
+                print(f"ACK_FiveTickA out {result}")
+        else:
+            if (strIndex == ''):
+                result = str(objValue)
+            else:
+                print(f"[{dt.datetime.now()}] 未知訂閱回應 strIndex={strIndex} objValue={objValue}")
+                result = '{0},{1}'.format(strIndex, objValue)
+    if result:
+        print('##================================================##\n')
+        print(result,'\n')
+    elif intMark == 2:
+        print(f"[{dt.datetime.now()}] intMark=2 回應沒有 result，strIndex={strIndex}")
+
+# Open — 從 accountEnv.json 讀取 server 欄位 (UAT=測試, PROD=正式)
+def open_api(yuanta):
+    cfg = _load_account_config()
+    server = cfg.get("server", "UAT").upper()
+    valid_servers = ['UAT', 'PROD']
+    if server not in valid_servers:
+        print(f"[{dt.datetime.now()}] [WARN] 未知伺服器 '{server}'，降級為 UAT (可用: {valid_servers})")
+        server = 'UAT'
+    mode = getattr(enumEnvironmentMode, server, enumEnvironmentMode.UAT)
+    label = '正式環境 PROD' if server == 'PROD' else '測試環境 UAT'
+    print(f"[{dt.datetime.now()}] 連線伺服器: {label}")
+    yuanta.Open(mode)
+    time.sleep(3)
+
+# 讀取 accountEnv.json (含 server 及 accounts)
+def _load_account_config():
+    if os.path.exists("accountEnv.json"):
+        with open("accountEnv.json", encoding="utf-8") as f:
+            return json.load(f)
+    print(f"[{dt.datetime.now()}] [WARN] accountEnv.json 不存在，使用預設 UAT")
+    return {"server": "UAT", "accounts": []}
+
+def get_active_accounts():
+    """從 accountEnv.json 讀取帳號清單。
+    依 server 欄位選擇: UAT → accounts[0], PROD → accounts[1]。
+    回傳 [{"stock": [id,pwd], "futures": [id,pwd]}, ...]"""
+    cfg = _load_account_config()
+    server = cfg.get("server", "UAT").upper()
+    accounts = cfg.get("accounts", [])
+    idx = 1 if server == "PROD" else 0
+    if idx >= len(accounts):
+        print(f"[{dt.datetime.now()}] [WARN] accounts 缺少 index={idx}，降級為 index=0")
+        idx = 0
+    env_entry = accounts[idx] if idx < len(accounts) else {}
+    return env_entry.get("users", [])
+
+# Login
+def login_api(yuanta,client):
+    accounts = get_active_accounts()
+    if not accounts:
+        print(f"[{dt.datetime.now()}] [WARN] accountEnv.json 無帳號設定，略過登入")
+        return
+
+    for i, acct in enumerate(accounts):
+        stock = acct["stock"]
+        futures = acct["futures"]
+        print(f"i={i} loginstatus={SUBSCRIPTION_STATE.get("login_status")}")
+
+        if  SUBSCRIPTION_STATE.get(
+            "login_status", EnumLoginStatusType.DEFAULT
+        ):
+            # 💡 修正點：將註解與 if 敘述斷行，if 才不會被吃掉
+            # 尚未登入現貨
+            if stock and len(stock) >= 2:
+                print(
+                    f"[{dt.datetime.now()}] 登入現貨帳號 [{i}]: {stock[0]} {len(stock)}"
+                )
+                yuanta.Login(stock[0], stock[1])
+                SUBSCRIPTION_STATE["login_status"] = (
+                    EnumLoginStatusType.CONNECT_LOGIN
+                )
+                time.sleep(1)                
+                print(f"LOGIN_SUCCESS 現貨帳號: {stock[0]} 將設定漲跌停req..")
+                SUBSCRIPTION_STATE["login_status"] = (
+                    EnumLoginStatusType.LOGIN_SUCCESS
+                )
+                
+        elif futures and len(futures) > 1:
+            
+            print(f"{dt.datetime.now()} 登入期貨帳號 [{i}]: {futures[0]}")
+            yuanta.Login(futures[0], futures[1])
+
+            # 現在這裡完全合法了，不會再噴 SyntaxError
+            for i in range(5):
+                time.sleep(1)  # 登入後最多休息5秒
+                if (
+                    SUBSCRIPTION_STATE["login_status"]
+                    == EnumLoginStatusType.CONNECT_LOGIN
+                ):
+                    continue
+                else:
+                    print(f"{dt.datetime.now()} 登入期貨帳號 [{i}]: {futures[0]} 合法了")
+                    break
+
+
+# LogOut
+def LogOut_api(yuanta):
+    SUBSCRIPTION_STATE['login_status'] = EnumLoginStatusType.LOGOUT 
+    yuanta.LogOut()
+
+#close
+def Close_api(yuanta):
+    #LogOut(yuanta)
+    LogOut_api(yuanta)
+    objYuantaOneAPI.Close()
+    objYuantaOneAPI.Dispose()
+
+
+def cleanup_and_logout():
+    """Gracefully logout and close YuantaOneAPI on shutdown."""
+    if 'objYuantaOneAPI' not in globals():
+        return
+
+    try:
+        if not SUBSCRIPTION_STATE.get('login_status', EnumLoginStatusType.LOGIN_FAILE):
+            print(f"[{dt.datetime.now()}] 6sec before未登入，wait6sec登出流程")
+            return
+        time.sleep(6)
+        if not SUBSCRIPTION_STATE.get('login_status', EnumLoginStatusType.LOGIN_FAILE):
+            print(f"[{dt.datetime.now()}] 未登入，跳過登出流程")
+            return
+        print(f"[{dt.datetime.now()}] 執行登出清理...")
+        LogOut_api(objYuantaOneAPI)
+        SUBSCRIPTION_STATE['login_status'] = EnumLoginStatusType.LOGIN_FAILE
+        objYuantaOneAPI.Close()
+        objYuantaOneAPI.Dispose()
+        print(f"[{dt.datetime.now()}] 已完成登出及關閉 YuantaOneAPI")
+    except Exception as e:
+        print(f"[{dt.datetime.now()}] 登出清理失敗: {e}")
+
+
+def _handle_exit_signal(signum, frame):
+    print(f"[{dt.datetime.now()}] 接收到結束信號 {signum}，準備登出...")
+    cleanup_and_logout()
+    raise KeyboardInterrupt
+
+
+def register_exit_signal_handlers():
+    signal.signal(signal.SIGINT, _handle_exit_signal)
+    try:
+        signal.signal(signal.SIGTERM, _handle_exit_signal)
+    except AttributeError:
+        # Windows may not support SIGTERM in all environments
+        pass
+
+
+def RQ_account(isfutures):
+    accounts = get_active_accounts()   #by "PROD"  
+    for i, acct in enumerate(accounts):
+        stock = acct["stock"]
+        futures = acct["futures"]
+    
+        if(isfutures):
+            return futures[0]
+        else:
+            return  stock[0]
+
+
+#即時回報(回補) 
+#GetRealport 10.0.0.20
+def GetRealReport(yuanta):
+        dataSetter = YuantaDataHelper(enumLangType.NORMAL)
+        dataSetter.SetFunctionID(10, 0, 0, 20)
+        dataSetter.SetUInt(1)
+        acc = RQ_account(False)
+        dataSetter.SetTByte(acc,22) #'S98875005091'
+        yuanta.RQ(acc, dataSetter)
+
+#即時回報彙總(回補)
+#GetRealReportMerge 10.0.0.16
+def GetRealReportMerge(yuanta):
+    dataSetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataSetter.SetFunctionID(10, 0, 0, 16)
+    dataSetter.SetByte(0)
+    dataSetter.SetByte(0)
+    dataSetter.SetTByte(' ',20)
+    dataSetter.SetUInt(1)
+    acc = RQ_account(False)
+    dataSetter.SetTByte(acc,22) #'S98875005091'
+    yuanta.RQ(acc, dataSetter)
+
+#取得己訂閱報價商品
+#GetQuoteList
+def GetQuoteList_api(yuanta):
+    yuanta.GetQuoteList()
+
+#現貨下單
+#SendStockOrder 30.100.10.31     
+def send_stock_order(yuanta):
+    stockorder = StockOrder()
+    
+    acc = RQ_account(False)
+	#Identify識別碼
+    stockorder.Identify = int('00001') 
+	#Account現貨帳號
+    stockorder.Account = acc #'S98875005091'
+	#APCode市場交易別 0:一般 2:盤後零股 4:盤中零股 7:盤後
+    stockorder.APCode = int('0') 
+	#TradeKind交易性質 00:委託單 03:改量 04:取消 07:改價
+    stockorder.TradeKind = int('0')
+	#OrderType委託種類 0:現貨 3:融資 4:融券 5策略借券(賣出) 6:避險借券(賣出) 9:現股當沖
+    stockorder.OrderType = '0' 
+	#StkCode股票代號
+    stockorder.StkCode = '2885'
+	#PriceFlag價格種類 H:漲停 -:平盤  L:跌停 ' ':限價  M:市價單    
+    stockorder.PriceFlag = ''
+	#Price委託價格 X 10000
+    stockorder.Price = int(35.55*10000) 
+	#OrderQty委託單位數
+    stockorder.OrderQty = int('1')
+	#BuySell買賣別 B:買  S:賣
+    stockorder.BuySell = 'B' 
+	#SellerNo營業員代碼
+    stockorder.SellerNo = int('0') 
+	#OrderNo委託書編號 (刪改單用)
+    stockorder.OrderNo = ''
+	#TradeDate交易日期 yyyy/MM/dd
+    stockorder.TradeDate = dt.datetime.now().strftime('%Y/%m/%d') 
+	#BasketNo自訂欄位 (英數字 長度 32 byte)
+    stockorder.BasketNo = '' 
+	#Time_in_force委託效期 0:ROD (預設) 3:IOC  4:FOK
+    stockorder.Time_in_force = '0'
+	
+    lstStockOrder = List[StockOrder]()
+    lstStockOrder.Add(stockorder)
+
+	#傳送下單
+    yuanta.SendStockOrder(acc, lstStockOrder) #'S98875005091'
+	#測試環境傳送後要休息一下
+    time.sleep(2)
+
+#期貨下單
+#SendFutureOrder 30.100.20.24   
+def send_future_order(yuanta):
+    futureOrder = FutureOrder()
+    
+	#Identify識別碼
+    futureOrder.Identify = int('1') 
+	#Account下單帳號
+    acc = RQ_account(true)  #'FF021005P051234567'
+    futureOrder.Account = acc
+	#FunctionCode功能別
+    futureOrder.FunctionCode = int('0') 
+	#CommodityID1商品名稱1
+    futureOrder.CommodityID1 = 'FIZF'    
+    #CallPut1買賣權1
+    futureOrder.CallPut1 = ''
+    #SettlementMonth1商品月份1
+    futureOrder.SettlementMonth1 = int('202409')
+    #StrikePrice1履約價1
+    futureOrder.StrikePrice1 = 0
+    #Price委託價格 X 10000
+    futureOrder.Price = 1600*10000
+    #OrderQty1委託口數1
+    futureOrder.OrderQty1 = 1
+    #BuySell1買賣別1
+    futureOrder.BuySell1 = 'B'
+    #CommodityID2商品名稱2
+    futureOrder.CommodityID2 = ''
+    #CallPut2買賣權2
+    futureOrder.CallPut2 = ''
+    #SettlementMonth2商品月份2
+    futureOrder.SettlementMonth2 = 0
+    #StrikePrice2履約價2
+    futureOrder.StrikePrice2 = 0
+    #OrderQty2委託口數2
+    futureOrder.OrderQty2 = 0
+    #BuySell2買賣別2
+    futureOrder.BuySell2 = ''
+    #OpenOffsetKind新平倉
+    futureOrder.OpenOffsetKind = '2'
+    #DayTradeID當沖註記
+    futureOrder.DayTradeID = ' '
+    #OrderType委託方式
+    futureOrder.OrderType = '2'
+    #OrderCond委託條件
+    futureOrder.OrderCond = ' '
+    #SellerNo營業員代碼
+    futureOrder.SellerNo = 0
+    #OrderNo委託書編號
+    futureOrder.OrderNo=''
+    #TradeDate交易日期
+    futureOrder.TradeDate = dt.today().strftime('%Y/%m/%d') 
+    #BasketNo(目前無作用)
+    futureOrder.BasketNo = ''
+    #Session盤別
+    futureOrder.Session = ' '
+	
+    lstFutureOrder = List[FutureOrder]()
+    lstFutureOrder.Add(futureOrder)
+
+	#傳送下單
+    acc = RQ_account(true)  #'FF021005P051234567'
+    yuanta.SendFutureOrder(acc, lstFutureOrder)
+	#測試環境傳送後要休息一下
+    time.sleep(2)
+
+#海外期貨下單 
+#SendOVFutureOrder 30.100.40.12
+def send_OvFuture_order(yuanta):
+        ovFutOrder = OVFutureOrder()
+        
+        # Identify識別碼
+        ovFutOrder.Identify = int('1') 
+        # Account下單帳號
+        acc = RQ_account(true)  #'FF021005P051234567'
+        ovFutOrder.Account = acc
+        # FunctionCode功能別
+        ovFutOrder.FunctionCode = int('0') 
+        # ExhCode交易所簡碼
+        ovFutOrder.ExhCode = 'CME'
+        # MarketNo市場代碼
+        ovFutOrder.MarketNo = int('203') 
+        # CommodityID商品代碼
+        ovFutOrder.CommodityID = 'JY'
+        # SettlementMonth商品年月
+        ovFutOrder.SettlementMonth = int('202412')
+        # StrikePrice屐約價格 X 10000
+        ovFutOrder.StrikePrice = 0
+        # UtPrice委託價格整數位 X 10000 (市價或市價停損單填 0)
+        ovFutOrder.UtPrice = 6970*10000
+        # BuySell買賣別 'B':買 'S':賣
+        ovFutOrder.BuySell = 'B'
+        # UtPrice2委託價格分子 X 10000
+        ovFutOrder.UtPrice2 = 0
+        # MinPrice2委託價格分母
+        ovFutOrder.MinPrice2 = 1
+        # UtPrice4停損執行價整數位 X 10000 (非停損單填0)
+        ovFutOrder.UtPrice4 = 0
+        # UtPrice5停損執行價格分子 X 10000 (非停損單填0)
+        ovFutOrder.UtPrice5 = 0
+        # UtPrice6停損執行價格分母 (非停損單填1)
+        ovFutOrder.UtPrice6 = 1
+        # OrderQty委託口數
+        ovFutOrder.OrderQty = 1
+        # Dtover是否當沖 Y/N
+        ovFutOrder.Dtover = 'N'
+        # OrderType委託種類 LMT:限價單, MKT:市價單,STP:停損單, SWL:停損限價單
+        ovFutOrder.OrderType = 'LMT'
+        # OrderNo委託書編號 
+        ovFutOrder.OrderNo = ''
+        # TradeDate交易日期 
+        ovFutOrder.TradeDate = dt.today().strftime('%Y/%m/%d') 
+
+        lstOVFutureOrder = List[OVFutureOrder]()
+        lstOVFutureOrder.Add(ovFutOrder)
+
+        acc = RQ_account(true)  #'FF021005P051234567'
+        #傳送下單
+        yuanta.SendOVFutureOrder(acc, lstOVFutureOrder)
+        #測試環境傳送後要休息一下
+        time.sleep(2)
+
+# ═══════════════════════════════════════════════════════════════
+# 自選股 JSON 設定載入
+# ═══════════════════════════════════════════════════════════════
+WATCHLIST_CONFIG = {}
+WATCHLIST_NAME = "自選股1"
+WATCHLIST_MTIME = 0  # watchlist.json 最後修改時間，用於偵測變更
+
+def load_watchlist_config(path: str = "watchlist.json"):
+    """載入自選股 JSON 設定檔。回傳 True 表示有變更。"""
+    global WATCHLIST_CONFIG, WATCHLIST_MTIME
+    if not os.path.exists(path):
+        return False
+    try:
+        mtime = os.path.getmtime(path)
+        if mtime == WATCHLIST_MTIME:
+            return False  # 無變更
+        with open(path, encoding="utf-8") as f:
+            WATCHLIST_CONFIG = json.load(f)
+        WATCHLIST_MTIME = mtime
+        return True
+    except Exception as e:
+        print(f"[watchlist] 載入設定失敗: {e}")
+        return False
+
+def get_watchlist(name: str = None) -> dict:
+    """取得指定自選股清單。每次呼叫時自動檢查 watchlist.json 是否更新。"""
+    load_watchlist_config()  # 自動重新載入（無變更則跳過）
+    name = name or WATCHLIST_NAME
+    return WATCHLIST_CONFIG.get(name, {"stocks": [], "TWOTC": [], "futures": [], "TAIFEX": []})
+
+
+def get_watchlist_groups(name: str = None) -> dict:
+    wl = get_watchlist(name)
+    return {
+        "stocks": list(wl.get("stocks") or []),
+        "TWOTC": list(wl.get("TWOTC") or []),
+        "futures": list(wl.get("futures") or []),
+        "TAIFEX" : list(wl.get("TAIFEX") or [])
+    }
+
+#todo:?? 暫時不含 futures
+def get_watchlist_stocks(name: str = None) -> list:
+    groups = get_watchlist_groups(name)
+    combined = []
+    for code in groups["stocks"] + groups["TWOTC"]+ groups["TAIFEX"]:
+        if code not in combined:
+            combined.append(code)
+    return combined
+
+
+def get_watchlist_futures(name: str = None) -> list:
+    return get_watchlist_groups(name).get("futures", [])
+
+try:
+    import json
+    load_watchlist_config()
+except Exception as e:
+    print(f"[watchlist] 載入設定失敗: {e}")
+
+#訂閱報價,暫時不含期貨零股..市場別
+#WatchlistAll 98.10.70.10
+def SubscribeWatchlistAll_api(yuanta,client):
+    """
+        送出「監倉全部」請求。
+        只有在上一次的請求已收到 ACK（或是第一次呼叫）時才會真的發送。
+    """
+    
+    # ---------- 核心檢查 ----------
+    if not client.RqState(EnumLoginStatusType.REQ_WatchlistAll):
+        # 仍在等待上一次的 ACK → 不再重複送出，直接結束函式
+        logger.debug(
+            "Skipping SubscribeWatchlistAll_api – waiting for ACK of REQ_WatchlistAll"
+        )
+        return    False      # ← 這裡的 return 只是提前離開函式，不執行後續程式碼
+
+    # ---------- 可以送出新請求 ----------
+
+    lstWatchlistAll = List[WatchlistAll]()
+    groups = get_watchlist_groups()
+    for code in groups["stocks"]:
+        watch = WatchlistAll()
+        watch.MarketNo = 1
+        watch.StockCode = code
+        lstWatchlistAll.Add(watch)
+    for code in groups["TWOTC"]:
+        watch = WatchlistAll()
+        watch.MarketNo = 2
+        watch.StockCode = code
+        lstWatchlistAll.Add(watch)
+
+    yuanta.SubscribeWatchlistAll(lstWatchlistAll)
+    return True
+
+#取消訂閱報價
+#UnsubWatchlistAll 98.10.70.10
+def UnsubWatchlistAll_api(yuanta):
+    lstWatchlistAll = List[WatchlistAll]()
+    groups = get_watchlist_groups()
+    for code in groups["stocks"]:
+        watch = WatchlistAll()
+        watch.MarketNo = 1
+        watch.StockCode = code
+        lstWatchlistAll.Add(watch)
+    for code in groups["TWOTC"]:
+        watch = WatchlistAll()
+        watch.MarketNo = 2
+        watch.StockCode = code
+        lstWatchlistAll.Add(watch)
+    yuanta.UnsubscribeWatchlistAll(lstWatchlistAll)    
+
+'''
+市場別
+public enum enumMarketType : byte
+    {
+        TWSE = 1, 台灣期貨交易所,上市股,含上市權證,市基金,水泥類(各類)報酬指數,市電子
+        TWOTC = 2, 上櫃,含上櫃權證
+        TAIFEX = 3, 台指選,微台,小電子,電指,金指,台指期,個股期,個股選
+        TWEMERGING = 4, 興櫃
+        TWSEODD = 5,  台灣證券交易所零股交易,上市治理評鑑,元大台灣50,0051,etf,2317倆者1/5
+        TWOTCODD = 6    上櫃,含上櫃權證零股交易
+        SGX = 202,
+        CME = 203,
+        CBOT = 204,
+        TCE = 205,
+        OSE = 207,
+        HKFE = 208,
+        NYBOT = 209,
+        LIFFE = 210,
+        XEUREX = 211,
+        ASX = 212,
+        CBOE = 215
+    }
+'''
+#訂閱五檔報價
+#FiveTick 210.10.60.10     
+def SubscribeFiveTick_api(yuanta,client):
+    
+    if not client.RqState(EnumLoginStatusType.REQ_FiveTickA):
+        logger.debug(
+            "Skipping SubscribeFiveTickA_api – waiting for ACK of REQ_FiveTickA"
+        )
+        return
+
+    lstFiveTick = List[FiveTickA]()
+    for code in get_watchlist_futures():
+        ft = FiveTickA()
+        ft.MarketNo = 3
+        ft.StockCode = code
+        lstFiveTick.Add(ft)
+    groups = get_watchlist_groups()
+    for code in groups["stocks"]:
+        ft = FiveTickA()
+        ft.MarketNo = 1
+        ft.StockCode = code
+        lstFiveTick.Add(ft)
+    for code in groups["TWOTC"]:
+        ft = FiveTickA()
+        ft.MarketNo = 2
+        ft.StockCode = code
+        lstFiveTick.Add(ft)
+    yuanta.SubscribeFiveTickA(lstFiveTick)
+
+#取消訂閱五檔報價
+#UnSubscribeFiveTick 210.10.60.10
+def UnSubscribeFiveTick_api(yuanta):
+    lstFiveTick = List[FiveTickA]()
+    for code in get_watchlist_futures():
+        ft = FiveTickA()
+        ft.MarketNo = 3
+        ft.StockCode = code
+        lstFiveTick.Add(ft)
+    groups = get_watchlist_groups()
+    for code in groups["stocks"]:
+        ft = FiveTickA()
+        ft.MarketNo = 1
+        ft.StockCode = code
+        lstFiveTick.Add(ft)
+    for code in groups["TWOTC"]:
+        ft = FiveTickA()
+        ft.MarketNo = 2
+        ft.StockCode = code
+        lstFiveTick.Add(ft)
+    yuanta.UnsubscribeFivetickA(lstFiveTick)
+
+#訂閱報價表指定欄位
+#Watchlist 210.10.70.11
+def SubscribeWatchlist_api(yuanta,client):
+    
+    if not client.RqState(EnumLoginStatusType.REQ_Watchlist):
+        logger.debug(
+            "Skipping Subscribe REQ_Watchlist_api – waiting for ACK of REQ_Watchlist"
+        )
+        return False
+    lstWatchlist = List[Watchlist]()
+    groups = get_watchlist_groups()
+    for code in groups["stocks"]:
+        for flag in (4, 6, 7):
+            watch = Watchlist()
+            watch.IndexFlag = flag
+            watch.MarketNo = 1
+            watch.StockCode = code
+            lstWatchlist.Add(watch)
+    for code in groups["TWOTC"]:
+        for flag in (4, 6, 7):
+            watch = Watchlist()
+            watch.IndexFlag = flag
+            watch.MarketNo = 2
+            watch.StockCode = code
+            lstWatchlist.Add(watch)
+    yuanta.SubscribeWatchlist(lstWatchlist) 
+    return True
+
+#取消訂閱報價表指定欄位 
+#UnSubscribeWatchlist 210.10.70.11
+def UnSubscribeWatchlist_api(yuanta):
+    lstWatchlist = List[Watchlist]()
+    groups = get_watchlist_groups()
+    for code in groups["stocks"]:
+        watch = Watchlist()
+        watch.IndexFlag = 7
+        watch.MarketNo = 1
+        watch.StockCode = code
+        lstWatchlist.Add(watch)
+    for code in groups["TWOTC"]:
+        watch = Watchlist()
+        watch.IndexFlag = 7
+        watch.MarketNo = 2
+        watch.StockCode = code
+        lstWatchlist.Add(watch)
+    yuanta.UnsubscribeWatchlist(lstWatchlist) 
+
+#訂閱分時明細
+#StockTick 210.10.40.10
+def SubscribeStocktick_api(yuanta,client):
+   
+    if not client.RqState(EnumLoginStatusType.REQ_StockTick):
+        logger.debug(
+            "Skipping SubscribeStockTick_api – waiting for ACK of REQ_StockTick"
+        )
+        return False
+    lstStocktick = List[StockTick]()
+    groups = get_watchlist_groups()
+    for code in groups["stocks"]:
+        stocktick = StockTick()
+        stocktick.MarketNo = 1
+        stocktick.StockCode = code
+        lstStocktick.Add(stocktick)
+    for code in groups["TWOTC"]:
+        stocktick = StockTick()
+        stocktick.MarketNo = 2
+        stocktick.StockCode = code
+        lstStocktick.Add(stocktick)
+    yuanta.SubscribeStockTick(lstStocktick)
+    return True
+
+#取消訂閱分時明細
+#UnSubscribeStocktick210.10.40.10
+def UnSubscribeStocktick_api(yuanta):
+    lstStocktick = List[StockTick]()
+    groups = get_watchlist_groups()
+    for code in groups["stocks"]:
+        stocktick = StockTick()
+        stocktick.MarketNo = 1
+        stocktick.StockCode = code
+        lstStocktick.Add(stocktick)
+    for code in groups["TWOTC"]:
+        stocktick = StockTick()
+        stocktick.MarketNo = 2
+        stocktick.StockCode = code
+        lstStocktick.Add(stocktick)
+    yuanta.UnsubscribeStocktick(lstStocktick) 
+
+
+
+#讀取報價50.0.0.16 執行異常，此功能每秒執行超過限制3次,取得昨收價/漲停價/跌停價
+#ReadWatchListAll 50.0.0.16 — 取得昨收價/漲停價/跌停價
+def ReadWatchListAll_api(yuanta, clien,isLogin):
+    loginStatus = SUBSCRIPTION_STATE.get('login_status')
+    if (int)(loginStatus.value) <  (int)(EnumLoginStatusType.LOGIN_SUCCESS.value):
+        return False
+   
+    if not client.RqState(EnumLoginStatusType.REQ_WatchlistAll):
+        print(
+            "Skipping REQ_WatchlistAll_api – waiting for ACK of REQ_WatchlistAll"
+        )
+        return False
+    
+    stock_ids = get_watchlist_stocks()
+    print(f"[{dt.datetime.now()}] ReadWatchListAll: 查詢 {len(stock_ids)} 檔參考價...")
+
+    for sid in stock_ids:
+        dataSetter = YuantaDataHelper(enumLangType.NORMAL)
+        dataSetter.SetFunctionID(50, 0, 0, 16)
+        dataSetter.SetUInt(1)
+        dataSetter.SetByte(1)
+        dataSetter.SetTByte(sid, 12)
+        acc = RQ_account(False)
+        yuanta.RQ(acc, dataSetter) #'S98875005091'
+        time.sleep(0.33)
+    if isLogin:
+        time.sleep(1)
+    else:
+        time.sleep(0.5)
+    return True
+
+def safe_float(value, default=0.0):
+    """ 安全轉換浮點數，若遇到亂碼、字串減號或 None 則回傳預設值 """
+    if value is None or str(value).strip() in ["", "-", "NaN", "nan"]:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+def safe_int(value, default=0):
+    """ 安全轉換整數 """
+    if value is None or str(value).strip() in ["", "-", "NaN", "nan"]:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+# 1. 最新、最完整的標準結構範本（滿足目的 2：自動擴充）
+DEFAULT_STOCK_STRUCTURE = {
+                'market_no': market_no,
+                'stock_name': stock_name,
+                'yst_price': yst_price,
+                'open_ref': open_ref,
+                'up_price': up_price,
+                'down_price': down_price,
+                'yst_vol': yst_vol,
+                'ext_name': ext_name,
+                'decimal': decimal,
+                'credit_pct': credit_pct,
+                'bond_pct': bond_pct,
+                # "new_feature_key": "default_value"  <-- 未來擴充直接加這               
+                'OpenPrice': safe_float(100.0),
+                'HighPrice': safe_float(110.0),
+                'LowPrice': safe_float(90.0),
+                'BuyPrice': safe_float(100.0),
+                'TotalOutVol' : safe_float(1000),
+                'SellPrice' : safe_float(100.0),
+                'TotalInVol' : safe_int(1000),
+                'DealPrice' : safe_float(100.0),
+                'TotalDealAmt' : safe_int(1000),
+                'uintVol' : safe_int(1000),    #單量內外盤標記
+                'singleVol' : safe_int(500), #單量
+                'TotalVol' : safe_int(10500),   #總成交量
+                'ytVolFlag' : safe_int(1) #單量內外盤標記
+                }
+
+
+
+def _save_stock_ref_json():
+    """     
+    開盤前後通用：精準更新融資、融券、參考價、成交價
+    param yuanta_socket_dict: 元大 Socket 傳入的當前最新數據 (每秒最多 3 次)
+    param force_save: 是否強制即時寫入檔案（盤前初始化與盤後結算時設為 True）
+    
+    將 SUBSCRIPTION_STATE['stock_ref'] 寫入 stock_ref.json 供 dashboard 讀取，
+    同時將參考價寫入 @stockID.csv（若當日尚無記錄）。
+    CSV 欄位與 _write_daily_summary() 統一使用中文格式。"""
+    ref = SUBSCRIPTION_STATE.get('stock_ref', {})
+    if not ref:
+        print(f"[{dt.datetime.now()}] stock_ref.json 找不到:{ref}")
+        return
+    #1 清理 pythonnet 編碼損壞的股名（用 stock_names.json 取代）,stock_names.json為已排名上市股code:name only
+    # 讀取正確的股票名稱對照表（確保名稱絕對不含 0xFFFD 亂碼）
+    
+    try:
+        with open("stock_names.json", "r", encoding="utf-8") as nf:
+            names_dict = json.load(nf)
+        for sid, info in ref.items():
+            # ────────────────────────────────────────────────────────
+            # 目的 2：如果 key 有缺失，擴充此結構（首次執行自動補齊）
+            # ────────────────────────────────────────────────────────
+            updated_info = DEFAULT_STOCK_STRUCTURE.copy()
+            # ────────────────────────────────────────────────────────
+            # 目的 1 & 3：無論如何都要更新股票名稱 Value（同步最新名稱）
+            # ────────────────────────────────────────────────────────
+            correct_name = names_dict.get(sid, "")
+            if correct_name:
+                updated_info["stock_name"] = correct_name
+            # ────────────────────────────────────────────────────────
+            # 目的 3：無論如何都要動態更新 Value（精準處理盤中變動欄位）
+            # ────────────────────────────────────────────────────────
+            dynamic_data = yuanta_socket_dict.get(sid, {})
+            if dynamic_data:
+                updated_info["margin_purchase"] = int(dynamic_data.get("margin_purchase", updated_info["margin_purchase"]))
+                updated_info["short_sale"]      = int(dynamic_data.get("short_sale", updated_info["short_sale"]))
+                updated_info["reference_price"] = float(dynamic_data.get("reference_price", updated_info["reference_price"]))
+                updated_info["current_price"]   = float(dynamic_data.get("current_price", updated_info["current_price"]))
+
+            updated_info.update(info)
+            sn = info.get("stock_name", "")
+            if sn and len([c for c in sn if ord(c) == 0xFFFD]) > 0:
+                correct = names_dict.get(sid, "")
+                if correct:
+                    info["stock_name"] = correct
+    except Exception:
+        pass
+    
+    # 2. 原子寫入 stock_ref.json (避免讀寫衝突)
+    print (f'save _save_stock_ref_json temp含漲跌停融資眷: {ref}')
+    try:
+        tmp_path = "stock_ref.json.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(ref, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, "stock_ref.json")
+        print(f"[{dt.datetime.now()}] stock_ref.json 已更新: {len(ref)} 檔 (含完整屬性)")
+    except Exception as e:
+        print(f"[{dt.datetime.now()}] stock_ref.json 寫入失敗: {e}")
+
+    """ 
+    3. 建立今日 CSV 佔位 (保持原樣，僅確保日期正確) :{1} 商品名稱:{2}昨收價:{3}:開盤參考價:{4}漲停價:{5}跌停價:{6}昨量:{7}擴充名:{8}小數位數:{9}融資成數:{10}融券成數:{11}'.
+    """
+    today = dt.datetime.now().strftime("%Y%m%d")
+    fieldnames = ["日期", "stock_id", "開盤價", "最高價", "最低價",
+                  "收盤價", "成交股數", "成交金額", "成交筆數",
+                  "total_in_volume", "total_out_volume", "estimated_day_volume"]
+    for stock_id, info in ref.items():
+        filename = f"@{stock_id}.csv"
+        # 檢查當日是否已有記錄（中文欄位名）
+        skip = False
+        if os.path.exists(filename):
+            try:
+                with open(filename, encoding="utf-8-sig", errors="replace") as f:
+                    for row in csv.DictReader(f):
+                        d = row.get("日期", row.get("date", ""))
+                        if d == today:
+                            skip = True
+                            break
+            except Exception:
+                pass
+        if skip:
+            continue       
+     
+        stock_id = info.get('ext_name', 0)
+        yst_price = info.get("yst_price", 0)
+        yst_vol = info.get('yst_vol', 0)
+        yesterday_volume = inf.get("yesterday_volume",0)
+        down_price = info.get("down_price", 0)
+        up_price = info.get('up_price', 0)
+        open_ref = info.get("open_ref", 0)
+        HighPrice = info.get("HighPrice", 0)
+        LowPrice = info.get("LowPrice", 0)
+        TotalInVol = info.get("TotalInVol", 0)
+        TotalDealAmt = info.get("TotalDealAmt", 0)
+        TotalOutVol = info.get("TotalOutVol", 0)
+        SellPrice = info.get("SellPrice",0)
+        DealPrice = info.get("DealPrice",0)
+        uintVol = info.get("uintVol",0) #單量內外盤標記
+        singleVol = info.get("singleVol")
+        TotalVol = info.get("TotalVol")
+        try:
+            file_exists = os.path.exists(filename)
+            with open(filename, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if not file_exists:
+                    writer.writeheader()                   
+                writer.writerow({
+                    "日期": today,
+                    "stock_id": stock_id,
+                    "開盤價": open_ref,
+                    "最高價": HighPrice,
+                    "最低價": LowPrice,
+                    "收盤價": yst_price,
+                    "成交股數": yst_vol,
+                    "成交金額": TotalDealAmt,
+                    "成交筆數": TotalVol,
+                    "total_in_volume": TotalInVol,
+                    "total_out_volume": TotalOutVol,
+                    "estimated_day_volume": yesterday_volume
+                })
+            print(f"[{dt.datetime.now()}] @{stock_id}.csv 已建立今日參考價預留: {yst_price}")
+        except Exception as e:
+            print(f"[{dt.datetime.now()}] @{stock_id}.csv 寫入失敗: {e}")
+
+#查詢委託成交
+# OrderTradeReport 20.101.0.18
+def OrderTradeReport_api(yuanta):
+    dataSetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataSetter.SetFunctionID(20, 101, 0, 18)
+    dataSetter.SetTByte('Y',1) #Y不列取消單 Cancel not show
+    dataSetter.SetUInt(1)
+    acc = RQ_account(False)
+    dataSetter.SetTByte(acc,22)
+    yuanta.RQ(acc,dataSetter)
+
+#查詢現貨庫存
+# SummaryReport 20.103.0.22
+#未提供複委託交易故國外股票庫存皆回傳0
+def SummaryReport_api(yuanta):
+    dataSetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataSetter.SetFunctionID(20, 103,0,22)
+    dataSetter.SetUInt(1)
+    acc = RQ_account(False)
+    dataSetter.SetTByte(acc,22) #'S98875005091'
+    yuanta.RQ(acc,dataSetter)
+
+#查詢期貨庫存
+# FutStoreSummaryReport 20.103.20.13
+def FutStoreSummaryReport_api(yuanta):
+    dataSetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataSetter.SetFunctionID(20, 103,20,13)
+    dataSetter.SetUInt(1)
+    acc = RQ_account(True)
+    dataSetter.SetTByte(acc,22)    #'FF021005P051234567'
+    yuanta.RQ(acc,dataSetter)
+
+#查詢國際期貨庫存
+# OVFutStoreSummaryReport 20.103.40.18
+def OVFutStoreSummaryReport_api(yuanta):
+    dataSetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataSetter.SetFunctionID(20, 103,40,18)
+    dataSetter.SetUInt(1)
+    acc = RQ_account(True)
+    dataSetter.SetTByte(acc,22)
+    yuanta.RQ(acc,dataSetter)
+
+#查詢簡易權益數庫存
+#FutInterestStore 20.104.20.20
+def FutInterestStore_api(yuanta):
+    dataSetter = YuantaDataHelper(enumLangType.NORMAL)
+    dataSetter.SetFunctionID(20,104,20,20)
+    acc = RQ_account(True)
+    dataSetter.SetTByte(acc,22)
+    dataSetter.SetTByte('1',1)
+    dataSetter.SetTByte('TWD',3)
+
+    yuanta.RQ(acc,dataSetter)
+    
+
+def FutDepositOptimum_api(yuanta):
+    yuanta.GetFutDepositOptimum(RQ_account(True))
+
+
+def SendFutureCombined_api(yuanta,depositOptimumLList):
+    yuanta.SendFutureCombined(RQ_account(True),depositOptimumLList)
+
+##########################################################################
+objYuantaOneAPI = YuantaOneAPITrader()
+objYuantaOneAPI.OnResponse += OnResponseEventHandler(objApi_OnResponse)
+objYuantaOneAPI.SetLogType(enumLogType.COMMON) 
+DOLList = List[DepositOptimum]()
+
+###########################################################################
+
+open_api(objYuantaOneAPI)
+
+# 先建立實例
+client = SocketState.SharePtr("CONNECT_LOGIN", EnumLoginStatusType.CONNECT_LOGIN)
+    
+if client.RqState(EnumLoginStatusType.CONNECT_LOGIN,"CONNECT_LOGIN"):
+    print(f"client登入成功 {client}")
+    client.name = "LOGIN_SUCCESS"
+    client.SocketType = EnumLoginStatusType.LOGIN_SUCCESS
+else:
+    print(f"client login_api.. {client} Faile!!!")
+
+login_api(objYuantaOneAPI,client)
+#登入後需休息3秒，主機端會控制快速重複登入
+time.sleep(3)
+
+print(f"[{dt.datetime.now()}] 登入狀態: {SUBSCRIPTION_STATE.get('login_status', EnumLoginStatusType.LOGIN_FAILE)}")
+if not SUBSCRIPTION_STATE.get('login_status', EnumLoginStatusType.LOGIN_FAILE):
+    print(f"[{dt.datetime.now()}] [WARN] 登入失敗或⚠️ 尚未登入，請先登入系統 — API 伺服器可能不在交易時段")
+
+#登出
+#LogOut_api(objYuantaOneAPI)
+
+#關閉
+#Close_api(objYuantaOneAPI)
+
+#即時回報(回補)GetRealport
+#GetRealReport(objYuantaOneAPI)
+
+#即時回報彙總(回補)GetRealReportMerge
+#GetRealReportMerge(objYuantaOneAPI)
+
+#取得己訂閱報價商品GetQuoteList
+#GetQuoteList_api(objYuantaOneAPI)
+
+#現貨下單 (已註解 — 避免非預期交易)
+#send_stock_order(objYuantaOneAPI)
+#print(f"[{dt.datetime.now()}] send_stock_order 已略過 (手動取消註解以啟用)")
+time.sleep(0.5)
+
+#期貨下單
+#send_future_order(objYuantaOneAPI)
+
+#海外期貨下單 
+#send_OvFuture_order(objYuantaOneAPI)
+
+
+#訂閱五檔FiveTick
+#SubscribeFiveTick_api(objYuantaOneAPI,client)
+
+#訂閱指定欄位Watchlist
+#SubscribeWatchlist_api(objYuantaOneAPI,client)
+
+#訂閱報價表WatchlistAll
+#SubscribeWatchlistAll_api(objYuantaOneAPI,client)
+
+#訂閱分時明細Stocktick
+#SubscribeStocktick_api(objYuantaOneAPI,client)
+
+#讀取報價ReadWatchListAll (取得昨收/漲停/跌停參考價)
+#ReadWatchListAll_api(objYuantaOneAPI)
+
+#查詢委託成交OrderTradeReport
+#OrderTradeReport_api(objYuantaOneAPI)
+
+#查詢現貨庫存SummaryReport
+#SummaryReport_api(objYuantaOneAPI)
+
+#查詢期貨庫存FutStoreSummaryReport
+#FutStoreSummaryReport_api(objYuantaOneAPI)
+
+#查詢國際期貨庫存OVFutStoreSummaryReport
+#OVFutStoreSummaryReport_api(objYuantaOneAPI)
+
+#查詢簡易權益數庫存FutInterestStore
+#FutInterestStore_api(objYuantaOneAPI)
+
+#查詢期貨保證金最佳化FutDepositOptimum
+#FutDepositOptimum_api(objYuantaOneAPI)
+#time.sleep(3)
+
+#期貨複式單組合SendFutureCombined
+#SendFutureCombined_api(objYuantaOneAPI,DOLList)
+############################################################################
+    
+'''
+ 已實現功能:
+ * 所有訂閱回應統一使用字典格式保存
+ * UI 每 1/60 秒更新一次顯示所有收到的信息
+ * 每 5 秒完整保存一筆包含時間、成交股數、成交金額、開盤價等資料
+ * 使用 asyncio 異步方法避免阻塞
+ * 支持多檔股票管理和內外盤成交量分析
+'''
+def _market_phase() -> str:
+    """判斷目前市場階段: 'pre_open'(09:00前), 'trading'(09:00-13:30),
+    'matching'(13:30-14:30), 'closed'(14:30後)。"""
+    now = dt.datetime.now()
+    t = now.hour * 60 + now.minute
+    if t < 9 * 60:
+        return 'pre_open'
+    if t <= 13 * 60 + 30:
+        return 'trading'
+    if t < 14 * 60 + 30:
+        return 'matching'
+    return 'closed'
+
+def subScriptOrder(objYuantaOneAPI,client,current_time,isLogin=True):
+        print(f"subScriptOrder {client.get_round()}")
+        if client.get_round()==EnumLoginStatusType.REQ_WatchlistAll.value:   #訂閱 over5s~300s
+            if SubscribeWatchlistAll_api(objYuantaOneAPI,client):
+                last_ref_price_time = current_time
+                last_watchlist_subscribe_time = current_time
+                print(f"[{dt.datetime.now()}] 週期性重新訂閱全部")
+                client.increment(isLogin)
+        elif client.get_round()==EnumLoginStatusType.REQ_Watchlist.value:
+            if SubscribeWatchlist_api(objYuantaOneAPI,client):
+                client.increment(isLogin)
+        elif client.get_round()==EnumLoginStatusType.REQ_FiveTickA.value:
+            if SubscribeFiveTick_api(objYuantaOneAPI ,client):
+                client.increment()               
+
+        elif client.get_round()==EnumLoginStatusType.REQ_StockTick.value:
+            if SubscribeStocktick_api(objYuantaOneAPI,client):
+                client.increment()
+
+        if (client.get_round()==EnumLoginStatusType.REQ_SUBSCRIBE_ADD.value) & (_market_phase()=='pre_open'):
+            if ReadWatchListAll_api(objYuantaOneAPI,client,isLogin):
+                client.increment(isLogin)
+        else:
+            client.increment(isLogin)
+            pass
+
+        return    
+
+def _write_daily_summary(stock_id: str, state):
+    """寫入每日總結 CSV (@stock_id.csv)，每個交易日一筆。
+    使用累積總量（state.total_volume）而非最後一筆 tick 量，
+    並從 extra_data 取 64-bit 總成交金額避免 int32 溢位。"""
+    filename = f"@{stock_id}.csv"
+    record = state.build_save_record() if isinstance(state, StockQuoteState) else state
+    if not record:
+        return
+
+    now = dt.datetime.now()
+
+    # 正規化價格：build_save_record() 已輸出「元」，此處 _norm 為安全防護（保留 2 位小數）
+    def _norm(p):
+        if p is None:
+            return 0.0
+        p = float(p)
+        return round(p / 10000.0, 2) if abs(p) >= 10000 else round(p, 2)
+
+    open_p = _norm(record.get("open_price"))
+    high_p = _norm(record.get("high_price"))
+    low_p = _norm(record.get("low_price"))
+    close_p = _norm(record.get("close_price"))
+    price_diff = round(close_p - open_p, 2)
+
+    # 使用累積內外盤量（state 累積值），非 record 的 interval delta
+    cum_in = int(getattr(state, 'total_in_volume', 0) or 0)
+    cum_out = int(getattr(state, 'total_out_volume', 0) or 0)
+    total_volume = cum_in + cum_out
+    if total_volume == 0:
+        total_volume = int(getattr(state, 'total_volume', 0) or 0)
+
+    # 總成交金額：優先從 extra_data 取 API 64-bit 值，否則以收盤價估算
+    extra = getattr(state, 'extra_data', {}) or {}
+    total_amt_raw = extra.get('total_amt', 0)
+    if total_amt_raw and total_amt_raw > 0:
+        # API total_amt 可能也是原始單位（價格×10000 × 量），需正規化
+        total_amount = int(total_amt_raw / 10000) if total_amt_raw > 1e12 else int(total_amt_raw)
+    else:
+        total_amount = int(total_volume * close_p) if close_p > 0 else 0
+
+    # @stock_id.csv 日總結（欄位對齊 cStock.load_data() 預期格式）
+    file_exists = os.path.exists(filename)
+    fieldnames = ["日期", "stock_id", "開盤價", "最高價", "最低價",
+                  "收盤價", "成交股數", "成交金額", "成交筆數",
+                  "total_in_volume", "total_out_volume", "estimated_day_volume"]
+    try:
+        with open(filename, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({
+                "日期": f"{now.year}{now.month:02d}{now.day:02d}",
+                "stock_id": stock_id,
+                "開盤價": open_p,
+                "最高價": high_p,
+                "最低價": low_p,
+                "收盤價": close_p,
+                "成交股數": total_volume,
+                "成交金額": total_amount,
+                "成交筆數": record.get("trade_count"),
+                "total_in_volume": cum_in,
+                "total_out_volume": cum_out,
+                "estimated_day_volume": record.get("estimated_day_volume") or 0,
+            })
+        # 同步更新到 yesterday/ 供隔日載入
+        yesterday_dir = "yesterday"
+        os.makedirs(yesterday_dir, exist_ok=True)
+        yesterday_path = os.path.join(yesterday_dir, f"{stock_id}.csv")
+        with open(yesterday_path, "w", newline="", encoding="utf-8") as yf:
+            yf.write("日期,成交股數,成交金額,開盤價,最高價,最低價,收盤價,漲跌價差,成交筆數\n")
+            yf.write(f"{now.strftime('%Y-%m-%d')},{total_volume},{total_amount},{open_p},{high_p},{low_p},{close_p},{price_diff},{record.get('trade_count')}\n")
+        print(f"[{dt.datetime.now()}] 日總結寫入: {filename}, yesterday/{stock_id}.csv (總量:{total_volume}, 總額:{total_amount})")
+    except Exception as e:
+        print(f"[{dt.datetime.now()}] 寫入日總結失敗 {stock_id}: {e}")
+
+
+_daily_summary_written = set()
+
+#更新權限:單筆下單每次內含最多筆數:30|單筆下單每秒限制:10筆|帳務類查詢每秒限制:3筆|報價類查詢每秒限制:3筆|訂閱報價每秒限制:10筆|訂閱報價每次最多:200個商品|訂閱報價上限:2000個商品
+async def show(update_interval: float = 1/60, save_interval: float = 5, subscribe_interval: float = 5):
+    """
+    異步顯示訂閱回應資訊，含市場排程控制。
+    09:00-13:25: 正常每 5 秒保存
+    13:25-13:30: 最後一次 CSV 保存 (trading→matching 轉換)
+    13:30-14:30: 盤後搓合，暫停 CSV 輸出
+    14:30 後:   寫入日總結 @stockID.csv，暫停 CSV 輸出，保持進程存活供 dashboard 讀取
+
+    API 優先機制: 啟動時建立 .api_active 標記檔，模擬器檢測到後自動暫停。
+    """
+    API_FLAG = ".api_active"
+    if not SUBSCRIPTION_STATE.get('login_status', EnumLoginStatusType.LOGIN_FAILE):
+        print(f"[{dt.datetime.now()}] show() 登入狀態未確認，跳過執行（不建立 .api_active）")
+        time.sleep(2)
+        #暫停1秒等待登入,可能延遲
+        if not SUBSCRIPTION_STATE.get('login_status', EnumLoginStatusType.LOGIN_FAILE):
+            print(f"[{dt.datetime.now()}] show() 登入狀態等2秒還是未確認,，跳過執行（不建立 .api_active）")
+            # 清除可能殘留的舊旗標
+            try:
+                if os.path.exists(API_FLAG):
+                    os.remove(API_FLAG)
+            except Exception:
+                pass
+            return []
+
+    isLogin = False
+    # We are interested in the transition CONNECT_LOGIN -> LOGIN_SUCCESS,若已過了LOGIN_SUCCESS?
+    client = SocketState.SharePtr("CONNECT_LOGIN", EnumLoginStatusType.CONNECT_LOGIN)
+    print(f'client: {client}')
+
+    # 登入成功後才建立 API active 標記，確保 run.py 不會誤判
+    try:
+        with open(API_FLAG, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+        print(f"[{dt.datetime.now()}] .api_active 已建立 (PID {os.getpid()}) client:{client}") #這裡的client正常
+    except Exception as e:
+        print(f"[{dt.datetime.now()}] 無法建立 .api_active: {e} client:{client}")
+
+    saved_records = []
+    last_save_time = time.time()
+    last_snapshot_time = time.time()  # Dashboard 快照計時器
+    last_subscribe_time = time.time()
+    last_watchlist_subscribe_time = time.time()  # WatchlistAll/Stocktick 獨立週期
+    last_ref_price_time = time.time()  # 定期更新 stock_ref.json 參考價（含新股）
+    prev_phase = _market_phase()
+    global _daily_summary_written
+    _csv_frozen = False  # 14:30 後凍結 CSV 寫入
+    _midday_recovered = False  # 盤中重啟復原旗標（只做一次）
+    
+
+    try:
+        if 'objYuantaOneAPI' in globals():
+            print(f"[{dt.datetime.now()}] show() 啟動時呼叫 ReadWatchListAll_api() 設定漲跌停條件client{client}")
+
+            time.sleep(1) #"等待登入中"
+            while(True):
+                if(ReadWatchListAll_api(objYuantaOneAPI,client,isLogin)):
+                    print("呼叫成功")
+                    last_subscribe_time = time.time()
+                    break
+                else:
+                    print("等待登入中")
+                    time.sleep(1)     
+            #SubscribeFiveTick_api(objYuantaOneAPI,client)            
+        else:
+            print(f"[{dt.datetime.now()}] show() 無法呼叫 ReadWatchListAll_api:YuantaAPI未初始化,設定漲跌停條件")
+
+        loginStatus = SUBSCRIPTION_STATE.get('login_status')
+        if (int)(loginStatus.value) >=  (int)(EnumLoginStatusType.LOGIN_SUCCESS.value):
+            isLogin = True
+            saved_count = 0
+            current_time = time.time()
+        while isLogin:
+            
+            phase = _market_phase()
+
+            if phase == 'pre_open':
+                subScriptOrder(objYuantaOneAPI,client,current_time)
+
+            # ---- 14:30 後: 寫入日總結，凍結 CSV，保持進程存活 ----
+            if phase == 'closed':
+                if not _csv_frozen:
+                    # 14:30 強制寫入最後一筆 CSV
+                    saved_count = 0
+                    for stock_id, state in list(SUBSCRIPTION_STATE['stocks'].items()):
+                        record = state.build_save_record() if isinstance(state, StockQuoteState) else state
+                        if not record or not record.get('stock_id'):
+                            continue
+                        if not state.has_trade_activity():
+                            continue
+                        now = dt.datetime.now()
+                        record['timestamp'] = f"{now.year}{now.month:02d}{now.day:02d} {now.hour:02d}:{now.minute:02d}:{now.second:02d}"
+                        saved_records.append(record)
+                        await _save_to_csv_async(stock_id, record)
+                        state.commit_save_snapshot()
+                        saved_count += 1
+                        state.last_saved_timestamp = state.latest_timestamp
+                    if saved_count > 0:
+                        print(f"[{dt.datetime.now()}] 14:30 強制寫入最後一筆 CSV: {saved_count} 筆")
+                    # 寫入日總結
+                    for stock_id, state in list(SUBSCRIPTION_STATE['stocks'].items()):
+                        if stock_id not in _daily_summary_written:
+                            _write_daily_summary(stock_id, state)
+                            _daily_summary_written.add(stock_id)
+                    print(f"[{dt.datetime.now()}] 收盤完成，CSV 輸出凍結 (進程保持存活供 dashboard 讀取)")
+                    _csv_frozen = True
+                # 繼續循環但不寫 CSV，只更新顯示與快照
+                for state in list(SUBSCRIPTION_STATE['stocks'].values()):
+                    try: _display_quote_info(state)
+                    except Exception: pass
+                    _write_snapshots()
+                    last_snapshot_time = current_time
+                await asyncio.sleep(update_interval)
+                current_time = time.time()
+                prev_phase = phase
+                continue
+
+            # ---- 13:30 強制寫入最後一筆 CSV (交易→盤後搓合轉換) ----
+            if prev_phase == 'trading' and phase == 'matching':
+                print(f"[{dt.datetime.now()}] 13:30 收盤時間到，強制寫入最後一筆 CSV if trading and phase")
+                saved_count = 0
+                for stock_id, state in list(SUBSCRIPTION_STATE['stocks'].items()):
+                    record = state.build_save_record() if isinstance(state, StockQuoteState) else state
+                    if not record or not record.get('stock_id'):
+                        continue
+                    if not state.has_trade_activity():
+                        continue
+                    now = dt.datetime.now()
+                    record['timestamp'] = f"{now.year}{now.month:02d}{now.day:02d} {now.hour:02d}:{now.minute:02d}:{now.second:02d}"
+                    saved_records.append(record)
+                    await _save_to_csv_async(stock_id, record)
+                    state.commit_save_snapshot()
+                    saved_count += 1
+                    state.last_saved_timestamp = state.latest_timestamp
+                if saved_count > 0:
+                    print(f"[{dt.datetime.now()}] 13:30 強制寫入完成: {saved_count} 筆")                
+                    client.reset_roundCountGr1()
+                    last_save_time = current_time
+
+            subscribe_triggered = False
+            #超時5秒的k
+            if current_time - last_subscribe_time >= subscribe_interval and phase in ('trading', 'matching'):   
+                if 'objYuantaOneAPI' in globals():
+                    try:
+                        last_subscribe_time = current_time
+                        subScriptOrder(objYuantaOneAPI,client,current_time)  #SubscribeFiveTick_api(objYuantaOneAPI,client)
+                        
+                        subscribe_triggered = True
+                        print(f"[{dt.datetime.now()}] 週期性重新呼叫1 subScriptOrder")
+                    except Exception as sub_err:
+                        print(f"[{dt.datetime.now()}] subScriptOrder 失敗: {sub_err} round:{client.get_round()}")
+                else:
+                    print(f"[{dt.datetime.now()}] 無法重新訂閱，objYuantaOneAPI 未初始化")
+
+            # 超時 60 秒重新訂閱全部四種訂閱，防止個股（尤其 OTC）訂閱過期掉線,超時60秒的k
+            if current_time - last_watchlist_subscribe_time >= 60 and phase in ('trading', 'matching'):
+                if 'objYuantaOneAPI' in globals():
+                    try:
+                        old_mtime = os.path.getmtime("watchlist.json") if os.path.exists("watchlist.json") else 0   #自選股
+
+            
+
+                        new_mtime = os.path.getmtime("watchlist.json") if os.path.exists("watchlist.json") else 0
+                        need_ref = (new_mtime > old_mtime) or (current_time - last_ref_price_time >= 300 *100)
+                        if need_ref:
+                            if new_mtime > old_mtime:
+                                print(f"[{dt.datetime.now()}] watchlist.json 有變更，重新讀取參考價")
+                            else:
+                                print(f"[{dt.datetime.now()}] 定期重新讀取參考價 (300s)")
+                            #if client.get_round()==4:
+                                #ReadWatchListAll_api(objYuantaOneAPI,client)
+                            subScriptOrder(objYuantaOneAPI,client,current_time)   
+                                #讀取報價,執行異常，此功能每秒執行超過限制3次,取得昨收價/漲停價/跌停價
+                            
+                    except Exception as sub_err:
+                        print(f"[{dt.datetime.now()}] 60s 重新訂閱失敗: {sub_err}")
+
+            # ---- 盤中重啟復原（僅執行一次，等訂閱推送後才有效） ----
+            if not _midday_recovered:
+                stocks = SUBSCRIPTION_STATE.get('stocks', {})
+                if len(stocks) > 0:
+                    recovered = 0
+                    import csv as _csv
+                    today_prefix = dt.datetime.now().strftime("%Y%m%d")
+                    for stock_id, state in list(stocks.items()):
+                        try:
+                            path = f"{stock_id}.csv"
+                            if not os.path.exists(path):
+                                continue
+                            # 方法 1: 從 @stockID.csv 讀取今日累積量（最準確，但僅盤後有）
+                            at_path = f"@{stock_id}.csv"
+                            restored = False
+                            if os.path.exists(at_path):
+                                with open(at_path, encoding='utf-8-sig', errors='replace') as _f:
+                                    at_rows = list(_csv.DictReader(_f))
+                                for r in reversed(at_rows):
+                                    d = r.get('日期', '') or r.get('date', '')
+                                    if today_prefix in str(d):
+                                        vol = int(float(r.get('成交股數', 0) or r.get('total_volume', 0) or 0))
+                                        if vol > 0 and isinstance(state, StockQuoteState):
+                                            state.total_volume = vol
+                                            state.total_in_volume = vol // 2
+                                            state.total_out_volume = vol // 2
+                                            restored = True
+                                            recovered += 1
+                                        break
+                            # 方法 2: 加總 5 秒 CSV 今日所有 deal_volume
+                            if not restored:
+                                with open(path, encoding='utf-8-sig', errors='replace') as _f:
+                                    rows = list(_csv.DictReader(_f))
+                                cum_vol = 0
+                                for r in rows:
+                                    ts = r.get('timestamp', '')
+                                    if today_prefix in ts:
+                                        dv = int(float(r.get('deal_volume', 0) or 0))
+                                        cum_vol += max(0, dv)
+                                if cum_vol > 0 and isinstance(state, StockQuoteState):
+                                    state.total_volume = cum_vol
+                                    state.total_in_volume = cum_vol // 2
+                                    state.total_out_volume = cum_vol // 2
+                                    recovered += 1
+                        except Exception:
+                            pass
+                    _midday_recovered = True
+                    if recovered > 0:
+                        print(f"[{dt.datetime.now()}] 盤中重啟復原: {recovered} 檔累積量從 CSV 加總")
+
+            # ---- 交易時段正常保存; matching 期間暫停 CSV 保存 ----
+            csv_phase_ok = phase == 'trading'
+            if csv_phase_ok and not subscribe_triggered and current_time - last_save_time >= save_interval and client.isAckStatus(EnumLoginStatusType.REQ_StockTick.name):
+                print(f"[{dt.datetime.now()}] 開始保存數據1. (phase={phase}) {list(SUBSCRIPTION_STATE['stocks'].items())}")
+                 
+                
+                for stock_id, state in list(SUBSCRIPTION_STATE['stocks'].items()):
+                    record = state.build_save_record() if isinstance(state, StockQuoteState) else state
+                    if not record or not record.get('stock_id'):
+                        continue
+                        print(f"record:{record} {stock_id}")
+                    # if state.last_saved_timestamp == state.latest_timestamp:
+                    #     continue
+                    # if not state.has_trade_activity():
+                    #     continue
+                    now = dt.datetime.now()
+                    record['timestamp'] = f"{now.year}{now.month:02d}{now.day:02d} {now.hour:02d}:{now.minute:02d}:{now.second:02d}"
+                    saved_records.append(record)
+                    await _save_to_csv_async(stock_id, record)
+                    state.commit_save_snapshot()
+                    saved_count += 1
+                    state.last_saved_timestamp = state.latest_timestamp
+                if saved_count > 0:
+                    print(f"[{dt.datetime.now()}] 已保存 {saved_count} 筆數據記錄 (phase={phase})")
+                    last_save_time = current_time
+                    client.reset_roundCountGr1()
+                else:
+                    print(f"[{dt.datetime.now()}] 沒有數據可保存 (phase={phase})")
+                    print(f"[{dt.datetime.now()}] subscription event counts: {SUBSCRIPTION_STATE['event_counts']}")
+                    time.sleep(1) #可能呼叫頻率過高
+                    #client.reset_round() 
+                                 
+
+            # 每 1/60 秒顯示所有已訂閱股票的最新信息
+            for state in list(SUBSCRIPTION_STATE['stocks'].values()):
+                try: 
+                    _display_quote_info(state)
+                except Exception: pass
+
+            # Dashboard 快照：每 0.5 秒寫入 snapshot/*.json（高速讀取用）
+            if current_time - last_snapshot_time >= 0.5:
+                try:
+                    _write_snapshots()
+                    last_snapshot_time = current_time
+                except Exception as snap_err:
+                    print(f"[{dt.datetime.now()}] snapshot 寫入失敗: {snap_err}")
+                current_time = time.time()
+
+            await asyncio.sleep(update_interval)
+            prev_phase = phase
+
+    except KeyboardInterrupt:
+        print("\n訂閱監控已停止")
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[{dt.datetime.now()}] show() crash: {e}")
+        print(tb)
+        try:
+            with open("error/error.log", "a", encoding="utf-8") as log:
+                log.write(f"\n[{dt.datetime.now()}] show() crash:\n{tb}\n")
+        except Exception:
+            pass
+    finally:
+        # 清理 API active 標記
+        try:
+            if os.path.exists(API_FLAG):
+                os.remove(API_FLAG)
+                print(f"[{dt.datetime.now()}] .api_active 已清除")
+        except Exception as e:
+            print(f"[{dt.datetime.now()}] 清除 .api_active 失敗: {e}")
+
+    return saved_records
+
+
+async def _save_to_csv_async(stock_id, record):
+    """
+    異步保存數據到 CSV 文件
+
+    Args:
+        stock_id: 股票代碼
+        record: 要保存的記錄
+    """
+    try:
+        filename = f"{stock_id}.csv"
+
+        file_exists = os.path.exists(filename)
+
+        with open(filename, 'a', newline='', encoding='utf-8') as f:
+            fieldnames = [
+                'timestamp', 'stock_id', 'deal_volume', 'deal_amount', 'open_price', 'high_price', 'low_price',
+                'close_price', 'price_diff', 'trade_count', 'estimated_day_volume', 'volume_label',
+                'pct_of_yesterday_avg',
+                'total_in_volume', 'total_out_volume', 'buy_total_volume', 'sell_total_volume', 'buy_sell_imbalance',
+                'buy_sell_pressure', 'buy_prices', 'buy_volumes', 'sell_prices', 'sell_volumes',
+                'ma5', 'ma10', 'price_momentum', 'byIndexFlag',
+                'stock_type', 'participation_score', 'participation_label', 'extra_data'
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            
+            if not file_exists:
+                writer.writeheader()
+            
+            row = {
+                'timestamp': record.get('timestamp'),
+                'stock_id': record.get('stock_id'),
+                'deal_volume': record.get('deal_volume') or 0,
+                'deal_amount': record.get('deal_amount') or 0,
+                'open_price': record.get('open_price'),
+                'high_price': record.get('high_price'),
+                'low_price': record.get('low_price'),
+                'close_price': record.get('close_price'),
+                'price_diff': record.get('price_diff'),
+                'trade_count': record.get('trade_count'),
+                'estimated_day_volume': record.get('estimated_day_volume') or 0,
+                'volume_label': record.get('volume_label'),
+                'pct_of_yesterday_avg': record.get('pct_of_yesterday_avg'),
+                'total_in_volume': record.get('total_in_volume') or 0,
+                'total_out_volume': record.get('total_out_volume') or 0,
+                'buy_total_volume': record.get('buy_total_volume') or 0,
+                'sell_total_volume': record.get('sell_total_volume') or 0,
+                'buy_sell_imbalance': record.get('buy_sell_imbalance'),
+                'buy_sell_pressure': record.get('buy_sell_pressure'),
+                'buy_prices': str(record.get('buy_prices', [])),
+                'buy_volumes': str(record.get('buy_volumes', [])),
+                'sell_prices': str(record.get('sell_prices', [])),
+                'sell_volumes': str(record.get('sell_volumes', [])),
+                'ma5': record.get('ma5'),
+                'ma10': record.get('ma10'),
+                'price_momentum': record.get('price_momentum'),
+                'byIndexFlag': record.get('byIndexFlag'),
+                'stock_type': record.get('stock_type'),
+                'participation_score': record.get('participation_score'),
+                'participation_label': record.get('participation_label'),
+                'extra_data': str(record.get('extra_data', {}))
+            }
+            writer.writerow(row)
+            print(f"已保存 {stock_id} 的報價數據到 {filename}")
+            
+    except Exception as e:
+        print(f"保存 CSV 文件出現錯誤: {e}")
+
+
+# ---- Dashboard 快照 (0.5 秒更新) ----
+_SNAPSHOT_DIR = "snapshot"
+_SNAPSHOT_RECORDS = {}  # {stock_id: [record, ...]} 保留最近 10 筆交易區間供 dashboard 顯示
+
+
+def _write_snapshots():
+    """將所有股票當前狀態寫入 snapshot/{stock_id}.json（覆寫模式）。
+    供 web_dashboard.py 高速讀取，避免每次 poll 讀取 2MB+ 的 5 秒 CSV。
+    每 0.5 秒呼叫一次。"""
+    os.makedirs(_SNAPSHOT_DIR, exist_ok=True)
+    for stock_id, state in list(SUBSCRIPTION_STATE.get('stocks', {}).items()):
+        try:
+            if isinstance(state, StockQuoteState):
+                record = state.build_save_record()
+            else:
+                record = state
+            if not record:
+                continue
+
+            # 正規化價格輔助（保留 2 位小數，門檻 >=10000 涵蓋所有 ≥1 元股票）
+            def _np(p):
+                if p is None:
+                    return None
+                p = float(p)
+                return round(p / 10000.0, 2) if abs(p) >= 10000 else round(p, 2)
+
+            # 累積值（供 dashboard 顯示總內外盤量）
+            cum_in = max(0, state.total_in_volume if isinstance(state, StockQuoteState) else record.get('cumulative_in_volume', 0) or 0)
+            cum_out = max(0, state.total_out_volume if isinstance(state, StockQuoteState) else record.get('cumulative_out_volume', 0) or 0)
+            # 累積總量：優先使用內外盤合計（兩者均為股），降級用 state.total_volume
+            # state.total_volume 可能來自 WatchlistAll byTemp 29（張, 未×1000）或 StockTick 逐筆累加（少量），不可靠
+            watchlist_cum = cum_in + cum_out
+            state_cum = max(0, state.total_volume if isinstance(state, StockQuoteState) else record.get('cumulative_volume', 0) or 0)
+            cum_vol = max(watchlist_cum, state_cum)
+
+            # 更新交易記錄緩衝（5 秒區間 delta）
+            interval_in = record.get('total_in_volume', 0) or 0
+            interval_out = record.get('total_out_volume', 0) or 0
+            interval_vol = record.get('deal_volume', 0) or 0
+            deal_amt = record.get('deal_amount', 0) or 0
+            ts = record.get('timestamp', '')
+            if interval_in > 0 or interval_out > 0 or interval_vol > 0:
+                buf = _SNAPSHOT_RECORDS.setdefault(stock_id, [])
+                # 避免重複寫入同一筆（用 timestamp 去重）
+                if not buf or buf[-1].get('time') != ts[-8:]:
+                    buf.append({
+                        'time': ts[-8:],
+                        'price': record.get('close_price'),
+                        'vol': max(0, interval_vol),
+                        'in_vol': max(0, interval_in),
+                        'out_vol': max(0, interval_out),
+                        'amt': max(0, deal_amt),
+                    })
+                    # 只保留最近 30 筆
+                    if len(buf) > 30:
+                        _SNAPSHOT_RECORDS[stock_id] = buf[-30:]
+
+            # 累積成交總額：優先用 cum_vol × close_price（最可靠），降級 API total_amt
+            extra = getattr(state, 'extra_data', {}) or {}
+            total_amt_raw = extra.get('total_amt', 0)
+            if cum_vol > 0 and record.get('close_price'):
+                cum_deal_amount = int(cum_vol * record['close_price'])
+            elif total_amt_raw and total_amt_raw > 0:
+                # API total_amt 單位不明確（可能是元或特殊格式），作為備援
+                cum_deal_amount = int(total_amt_raw / 10000) if total_amt_raw > 1e12 else int(total_amt_raw)
+            else:
+                cum_deal_amount = 0
+
+            snap = {
+                'timestamp': ts,
+                'stock_id': record.get('stock_id', stock_id),
+                'open_price': record.get('open_price'),
+                'high_price': record.get('high_price'),
+                'low_price': record.get('low_price'),
+                'close_price': record.get('close_price'),
+                'price_diff': record.get('price_diff'),
+                'deal_volume': max(0, interval_vol),     # 5 秒區間成交量（與 CSV 一致）
+                'deal_amount': record.get('deal_amount'),
+                'cumulative_deal_volume': cum_vol,        # 累積總成交量（股）
+                'cumulative_deal_amount': cum_deal_amount, # 累積總成交金額（元）
+                'trade_count': record.get('trade_count'),
+                'total_in_volume': cum_in,                # 累積內盤量（dashboard 顯示用）
+                'total_out_volume': cum_out,              # 累積外盤量（dashboard 顯示用）
+                'estimated_day_volume': record.get('estimated_day_volume'),
+                'volume_label': record.get('volume_label'),
+                'pct_of_yesterday_avg': record.get('pct_of_yesterday_avg'),
+                'prev_average_volume': state.prev_average_volume if isinstance(state, StockQuoteState) else record.get('prev_average_volume'),
+                'buy_total_volume': record.get('buy_total_volume'),
+                'sell_total_volume': record.get('sell_total_volume'),
+                'buy_sell_imbalance': record.get('buy_sell_imbalance'),
+                'buy_sell_pressure': record.get('buy_sell_pressure'),
+                'buy_prices': record.get('buy_prices', []),
+                'buy_volumes': record.get('buy_volumes', []),
+                'sell_prices': record.get('sell_prices', []),
+                'sell_volumes': record.get('sell_volumes', []),
+                'ma5': record.get('ma5'),
+                'ma10': record.get('ma10'),
+                'price_momentum': record.get('price_momentum'),
+                'stock_type': record.get('stock_type'),
+                'participation_score': record.get('participation_score'),
+                'participation_label': record.get('participation_label'),
+                'records': _SNAPSHOT_RECORDS.get(stock_id, [])[-10:],  # 最近 10 筆交易區間
+            }
+            fpath = os.path.join(_SNAPSHOT_DIR, f"{stock_id}.json")
+            # 原子寫入：先寫 .tmp 再 rename，避免 dashboard 讀到半寫入檔案
+            tmp_path = fpath + ".tmp"
+            try:
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(snap, f, ensure_ascii=False)
+                os.replace(tmp_path, fpath)  # Windows 上 os.replace 為原子操作
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+
+def _display_quote_info(state):
+    """
+    顯示訂閱的報價信息（安全打印，避免 cp950 編碼崩潰）
+    """
+    try:
+        # 安全編碼：避免 cp950 console 列印中文崩潰
+        try:
+            import sys as _sys
+            _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
+        if isinstance(state, StockQuoteState):
+            record = state.build_save_record()
+        else:
+            record = state
+
+        if not record:
+            return
+
+        stock_id = record.get('stock_id', 'N/A')
+        byIndexFlag = record.get('byIndexFlag', 'N/A')
+        buy_prices = record.get('buy_prices', [])
+        buy_volumes = record.get('buy_volumes', [])
+        sell_prices = record.get('sell_prices', [])
+        sell_volumes = record.get('sell_volumes', [])
+        extra_data = record.get('extra_data', {})
+
+        def _fmt_vol(v):
+            """顯示成交量：API 原始股數 → 張（÷1000），None → N/A"""
+            return f"{v/1000:.0f}張" if v is not None else "N/A"
+
+        print(f"\n===== {stock_id} 報價 (索引: {byIndexFlag}) =====")
+        close_price = record.get('close_price')
+        deal_volume = record.get('deal_volume')
+        deal_amount = record.get('deal_amount')
+        open_price = record.get('open_price')
+        high_price = record.get('high_price')
+        low_price = record.get('low_price')
+        price_diff = record.get('price_diff')
+        trade_count = record.get('trade_count')
+        total_in_volume = record.get('total_in_volume')
+        total_out_volume = record.get('total_out_volume')
+        estimated_day_volume = record.get('estimated_day_volume')
+        pct_of_yesterday_avg = record.get('pct_of_yesterday_avg')
+
+        print(f"最新成交: {close_price if close_price is not None else 'N/A'} 量: {_fmt_vol(deal_volume)} 成交額: {deal_amount if deal_amount is not None else 'N/A'}")
+        print(f"開: {open_price if open_price is not None else 'N/A'}  高: {high_price if high_price is not None else 'N/A'}  低: {low_price if low_price is not None else 'N/A'}  收: {close_price if close_price is not None else 'N/A'}  漲跌: {price_diff if price_diff is not None else 'N/A'}")
+        print(f"成交筆數: {trade_count} 內盤: {_fmt_vol(total_in_volume)} 外盤: {_fmt_vol(total_out_volume)} 估日量: {_fmt_vol(estimated_day_volume)} 昨日均量%: {pct_of_yesterday_avg if pct_of_yesterday_avg is not None else 'N/A'}")
+        print(f"分類: {record.get('stock_type', 'N/A')} | 主力/散戶: {record.get('participation_label', 'N/A')} (score={record.get('participation_score', 'N/A')})")
+
+        if extra_data:
+            print(f"额外訂閱欄位: {extra_data}")
+
+        if record.get('ma5') is not None or record.get('ma10') is not None:
+            print(f"MA5: {record.get('ma5')}  MA10: {record.get('ma10')}  動量: {record.get('price_momentum')}")
+
+        if record.get('buy_total_volume') is not None or record.get('sell_total_volume') is not None:
+            print(f"買總量: {_fmt_vol(record.get('buy_total_volume'))} 賣總量: {_fmt_vol(record.get('sell_total_volume'))} 盤差: {record.get('buy_sell_imbalance')} 盤壓: {record.get('buy_sell_pressure')}%")
+
+        if buy_volumes and sell_volumes:
+            total_buy = sum(int(v) for v in buy_volumes if v is not None)
+            total_sell = sum(int(v) for v in sell_volumes if v is not None)
+            print(f"買盤累計量: {_fmt_vol(total_buy)}, 賣盤累計量: {_fmt_vol(total_sell)}")
+            if total_buy + total_sell > 0:
+                buy_ratio = total_buy / (total_buy + total_sell) * 100
+                sell_ratio = total_sell / (total_buy + total_sell) * 100
+                print(f"買盤佔比: {buy_ratio:.2f}%, 賣盤佔比: {sell_ratio:.2f}%")
+            print(f"\n===== {stock_id} 五檔報價 (索引: {byIndexFlag}) =====")
+            for i in range(min(5, len(buy_prices), len(buy_volumes), len(sell_prices), len(sell_volumes))):
+                print(f"買 {i+1}: {buy_prices[i]:>8} x {buy_volumes[i]:>6} | 賣 {i+1}: {sell_prices[i]:>8} x {sell_volumes[i]:>6}")
+    
+    except Exception as e:
+        print(f"顯示報價信息出現錯誤: {e}")
+
+
+# 程式最後執行 show，並保存返回的數據記錄
+register_exit_signal_handlers()
+print(f"[{dt.datetime.now()}] 即將呼叫 asyncio.run(show())")
+try:
+    if SUBSCRIPTION_STATE.get('login_status', EnumLoginStatusType.LOGIN_FAILE):
+        saved_data = asyncio.run(show())
+        print(f"[{dt.datetime.now()}] asyncio.run(show()) 已結束")
+    else:
+        print(f"[{dt.datetime.now()}] 跳過 show(): 未登入。請確認 API 伺服器時段及帳號密碼。")
+        saved_data = []
+except KeyboardInterrupt:
+    print(f"[{dt.datetime.now()}] 收到 Ctrl+C，已觸發登出流程")
+    saved_data = []
+except Exception as e:
+    print(f"[{dt.datetime.now()}] 執行 show() 時發生錯誤: {e}")
+    import traceback; traceback.print_exc()
+    saved_data = []
+finally:
+    if SUBSCRIPTION_STATE.get('login_status', EnumLoginStatusType.LOGIN_FAILE):
+        cleanup_and_logout()
+
+# 處理保存的數據（如果需要）
+if saved_data:
+    print(f"總共保存了 {len(saved_data)} 筆數據記錄")
+    # 可以在這裡添加進一步的數據處理邏輯
