@@ -125,3 +125,5 @@ git commit -m "新增數據可視化功能: 支持生成交互式K線圖"
 5. 注意事項
 請勿直接向 main 分支推送更改。
 請在 PR 中提及相關的 Issues（例如 #123）以便追溯。
+
+This function is used by the Yuanta Python API to interpret detailed dynamic information of individual stocks and permanently save it to a CSV file. It also generates corresponding JSON and CSV files based on the selected stocks. You need to apply for a Yuanta API membership to obtain login privileges.
