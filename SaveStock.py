@@ -69,17 +69,17 @@ def safe_int(value, default=0):
 
 # 1. 最新、最完整的標準結構範本（滿足目的 2：自動擴充）
 DEFAULT_STOCK_STRUCTURE = {
-                'market_no': market_no,
-                'stock_name': stock_name,
-                'yst_price': yst_price,
-                'open_ref': open_ref,
-                'up_price': up_price,
-                'down_price': down_price,
-                'yst_vol': yst_vol,
-                'ext_name': ext_name,
-                'decimal': decimal,
-                'credit_pct': credit_pct,
-                'bond_pct': bond_pct,
+                'market_no': None,
+                'stock_name': None,
+                'yst_price': None,
+                'open_ref': None,
+                'up_price': None,
+                'down_price': None,
+                'yst_vol': None,
+                'ext_name': None,
+                'decimal': None,
+                'credit_pct': None,
+                'bond_pct': None,
                 # "new_feature_key": "default_value"  <-- 將擴充直接加這               
                 'OpenPrice': safe_float(100.0),
                 'HighPrice': safe_float(110.0),
@@ -95,6 +95,7 @@ DEFAULT_STOCK_STRUCTURE = {
                 'TotalVol' : safe_int(10500),   #總成交量
                 'ytVolFlag' : safe_int(1) #單量內外盤標記
                 }
+# NOTE: placeholders (`None`) used for fields that are populated later at runtime.
 
 
 

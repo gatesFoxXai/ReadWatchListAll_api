@@ -1,49 +1,43 @@
-###程式名稱:YuantaAPI_Pythonnet.py
-###程式用途說明:本程式為使用YuantaOneAPI.dll的範例程式
-###特別說明:透過Pythonnet引用YuantaOneAPI.dll
-###範例程式更新日期:2025.02.27
 
-### 修改摘要 (2026.05.20 更新)
-### 1. 新增 StockQuoteState 類別封裝股票報價狀態管理
-###    - 支援五檔報價、成交明細、觀察清單等數據更新
+### 1.  StockQuoteState 類別封裝股票報價狀態管理
+###    - todp:登入期間,初始化盤前資料
+###    - 登入國內外證卷及期貨約3-5秒,收到國內證卷登入後,sleep(1) ,todo: Request 
+###    - 五檔報價、成交明細、觀察清單等數據更新
 ###    - 自動計算開高低收、漲跌價差、估計日成交量
 ###    - 內外盤成交量分析，用於主力/散戶占比評估
-### 2. 統一訂閱數據存儲到全局 SUBSCRIPTION_STATE 字典
+### 2. 統一訂閱數據存儲到全局 SUBSCRIPTION_STATE 字典&json&csv data
 ###    - stocks: 各股票報價狀態 (StockQuoteState 實例)
 ###    - system: 系統訊息
-###    - rq_rp: 查詢回應
+###    - rq_rp: 查詢->回應->保存->next
 ### 3. 實現異步 show() 方法 (含市場排程控制)
-###    - 每 1/60 秒更新 UI 顯示所有訂閱股票資訊
+###    - 每 1/60 秒更新 UI 顯示所有訂閱股票資訊,可謂每秒3次查璇調整偵樹
 ###    - 交易時段(09:00-13:30): 每 5 秒保存完整報價到 CSV
 ###    - 盤後搓合(13:30+~14:30): 暫停 CSV 輸出
 ###    - 收盤後(14:30+): 寫入日總結 @stockID.csv 後停止
-### 4. 優化訂閱回應處理函數
+### 4. 優化訂閱回應處理函數,訂閱需等ack 才准下一個request
 ###    - SubscribeFiveTick_out: 處理五檔報價 (實測心跳訊號)
 ###    - SubscribeWatclistAll_Out: 處理觀察清單報價
 ###    - SubscribeStocktick_out: 處理分時成交明細
 ###    - SubscribeWatchlist_Out: 處理指定欄位報價
 ### 5. 新增異步 CSV 保存功能
 ###    - _save_to_csv_async: 非阻塞式數據持久化，支援多股票並發保存
-### 6. 修復 pct_of_yesterday_avg 缺失問題 ? 待完善
-###    - StockQuoteState._load_yesterday_data(): 從 yesterday/ 載入昨量
-### 7. 新增日總結寫入 _write_daily_summary()
-###    - @stockID.csv: 每交易日一筆 OHLCV 供隔日快速載入
-###    - 同步更新 yesterday/{stockID}.csv 為最新日資料
-### 8. 修復 _display_quote_info() 重複顯示程式碼
-### 9. 市場排程輔助函數 _market_phase(): pre_open/trading/matching/closed/todo 設計tool from公開資訊 驗證csv正確性
-#10.  由api生成,for dashboard use, todo:新增各股時,需同時建立stock_ref.json 'stock'{name:} 包含股號,股名,於 _save_stock_ref_json 補足 stock_ref.json 所有api資訊
+### 6. 修復 pct_of_yesterday_avg 缺失問題 ? 病獨立至extJsonCsv.py
+###    - StockQuoteState._load_yesterday_data(): 從 yesterday/ 載入昨量,包含未來待處裡的分析融資卷,漲跌停參考價,昨日數據,以api為據
+
 
 import os
 import clr
 import json
 import time
+import logging
+from threading import Semaphore
 import signal
 import datetime as dt
 import struct
 import pathlib
 import sys
 import csv
-import random
+import time
 from pathlib import Path
 import pandas as pd
 import asyncio
@@ -63,37 +57,7 @@ SUBSCRIPTION_STATE = {
     'event_counts': {},
     'stock_ref':{}
 }
-"""
-class YuantaAPI_Pythonnet:          # 這是你原本的類別名稱（黑盒子內）
-# -----------------------------------------------------------------
-# 1️⃣  建構子 – 這是唯一需要動的地方
-# -----------------------------------------------------------------
-    def __init__(self, *args, **kwargs):
-        
-        原本的 __init__ 可能會有各種參數（host, port, username, password …）。
-        為了不破壞原始行為，我們使用 *args, **kwargs 把所有參數原樣傳給
-        父類別（或原始實作），然後在這裡附加我們自己的狀態字典。
-        若你確定原本的 __init__ 沒參數，亦可直接寫成 `def __init__(self):`。
 
-        為每一種可能的請求建立一個 SocketState 實例
-                
-        self._req_states = {
-            # 登入相關（已在 Login 部分特別處理，這裡保留以防萬一）
-            EnumLoginStatusType.CONNECT_LOGIN:   SocketState("CONNECT_LOGIN",   EnumLoginStatusType.CONNECT_LOGIN),
-            EnumLoginStatusType.LOGIN_SUCCESS:   SocketState("LOGIN_SUCCESS",   EnumLoginStatusType.LOGIN_SUCCESS),
-
-            # 常見的行情訂閱請求 – 依照你實際需要的 enum 加入／刪除
-            EnumLoginStatusType.REQ_FiveTickA:   SocketState("REQ_FiveTickA",   EnumLoginStatusType.REQ_FiveTickA),
-            EnumLoginStatusType.REQ_WatchlistAll:SocketState("REQ_WatchlistAll",EnumLoginStatusType.REQ_WatchlistAll),
-            EnumLoginStatusType.REQ_StockTick:   SocketState("REQ_StockTick",   EnumLoginStatusType.REQ_StockTick),
-            EnumLoginStatusType.REQ_SUBSCRIBE_ADD:SocketState("REQ_SUBSCRIBE_ADD",EnumLoginStatusType.REQ_SUBSCRIBE_ADD),
-            # 再依需求加入其他 REQ_* …
-        }
-
-        # （可選）如果你也想要追蹤 ACK 本身的狀態，可再加一個字典：
-        # self._ack_states = { … }
-   
-"""
 
 def to_uint32(v):
     """將 C# API 可能溢位的 int32 值轉為 Python 無號整數。
@@ -143,10 +107,10 @@ class StockQuoteState:
         self.market_no = market_no        
         self.latest_timestamp = None        
         self.byIndexFlag = None
-        self.buy_prices = []
-        self.buy_volumes = []
-        self.sell_prices = []
-        self.sell_volumes = []
+        self.buy_prices = [None] * 5
+        self.buy_volumes = [0] * 5
+        self.sell_prices = [None] * 5
+        self.sell_volumes = [0] * 5
         self.last_deal_price = None
         self.last_deal_volume = None
         self.total_in_volume = 0
@@ -182,7 +146,22 @@ class StockQuoteState:
         try:
             self._load_yesterday_data()
         except Exception as e:
+            # 若載入昨日資料失敗，記錄錯誤但不阻斷物件建立
             print(f"[StockQuoteState] 載入昨日數據失敗 {stock_id}: {e}")
+
+    def is_market_open(self) -> bool:
+        """判斷目前是否為台股交易時間。
+
+        交易時段為週一至週五 09:00:00 ~ 13:30:00（含午盤收盤）。
+        若為週末或不在此時間範圍內，回傳 ``False``，否則回傳 ``True``。
+        """
+        now = dt.datetime.now()
+        # 週六(5) 或 週日(6) 為非交易日
+        if now.weekday() >= 5:
+            return False
+        market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        market_end = now.replace(hour=13, minute=30, second=0, microsecond=0)
+        return market_start <= now <= market_end
 
     def update_five_tick(self, byIndexFlag, buy_prices, buy_volumes, sell_prices, sell_volumes, timestamp=None):
         self.byIndexFlag = byIndexFlag
@@ -1143,7 +1122,7 @@ def ReadWatchListAll_Out(abyData):
             
             # 假設這是您「最新、最完整」的股票資料結構範本
             # 未來如果又要增加新欄位（例如：新增 'volume' 欄位），直接加在這裡即可！
-            SUBSCRIPTION_STATE.('stock_ref', {})[stock_id] = {
+            SUBSCRIPTION_STATE['stock_ref'][stock_id] = {
                 'market_no': market_no,
                 'stock_name': stock_name,
                 'yst_price': yst_price,
@@ -3190,7 +3169,7 @@ def SubscribeWatchlistAll_api(yuanta,client):
     """
     
     # ---------- 核心檢查 ----------
-    if not client.RqState(EnumLoginStatusType.REQ_WatchlistAll):
+    if not clien.RqState(EnumLoginStatusType.REQ_WatchlistAll):
         # 仍在等待上一次的 ACK → 不再重複送出，直接結束函式
         logger.debug(
             "Skipping SubscribeWatchlistAll_api – waiting for ACK of REQ_WatchlistAll"
@@ -3403,6 +3382,16 @@ def ReadWatchListAll_api(yuanta, clien,isLogin):
     if (int)(loginStatus.value) <  (int)(EnumLoginStatusType.LOGIN_SUCCESS.value):
         return False
    
+    # 若當前非交易時段，直接返回 False，避免不必要的 API 呼叫
+    try:
+        market_phase = _market_phase()
+        if market_phase != "開盤":
+            logging.info(f"Market phase '{market_phase}' – Skip ReadWatchListAll_api")
+            return False
+    except Exception as e:
+        logging.warning(f"Failed to determine market phase: {e}")
+        # 若無法取得市場階段，仍繼續執行原有流程
+
     if not client.RqState(EnumLoginStatusType.REQ_WatchlistAll):
         print(
             "Skipping REQ_WatchlistAll_api – waiting for ACK of REQ_WatchlistAll"
@@ -3412,15 +3401,45 @@ def ReadWatchListAll_api(yuanta, clien,isLogin):
     stock_ids = get_watchlist_stocks()
     print(f"[{dt.datetime.now()}] ReadWatchListAll: 查詢 {len(stock_ids)} 檔參考價...")
 
+    # Global semaphore to ensure no more than 3 API calls per second across all threads.
+    # Defined at module level for shared usage.
+    api_semaphore = globals().setdefault('api_semaphore', Semaphore(3))
     for sid in stock_ids:
-        dataSetter = YuantaDataHelper(enumLangType.NORMAL)
-        dataSetter.SetFunctionID(50, 0, 0, 16)
-        dataSetter.SetUInt(1)
-        dataSetter.SetByte(1)
-        dataSetter.SetTByte(sid, 12)
-        acc = RQ_account(False)
-        yuanta.RQ(acc, dataSetter) #'S98875005091'
-        time.sleep(0.33)
+        # Acquire semaphore before making the request to respect rate limit.
+        api_semaphore.acquire()
+        try:
+            retry_attempts = 3
+            for attempt in range(1, retry_attempts + 1):
+                try:
+                    start_time = time.time()
+                    dataSetter = YuantaDataHelper(enumLangType.NORMAL)
+                    dataSetter.SetFunctionID(50, 0, 0, 16)
+                    dataSetter.SetUInt(1)
+                    dataSetter.SetByte(1)
+                    dataSetter.SetTByte(sid, 12)
+                    acc = RQ_account(False)
+                    yuanta.RQ(acc, dataSetter)  # 'S98875005091'
+                    elapsed = time.time() - start_time
+                    # If request took longer than 5 seconds, treat as timeout and retry.
+                    if elapsed > 5:
+                        raise TimeoutError(
+                            f"ReadWatchListAll_api request for {sid} timed out after {elapsed:.2f}s"
+                        )
+                    # Successful request within timeout, break out of retry loop.
+                    break
+                except Exception as e:
+                    logging.warning(
+                        f"ReadWatchListAll_api attempt {attempt} for {sid} failed: {e}")
+                    if attempt == retry_attempts:
+                        # Final failure, continue to next sid.
+                        break
+                    # Exponential backoff before retrying.
+                    time.sleep(0.5 * attempt)
+        finally:
+            # Ensure semaphore is always released.
+            api_semaphore.release()
+            # Small pause to maintain overall rate limit (approx 0.33 s per request).
+            time.sleep(0.33)
     if isLogin:
         time.sleep(1)
     else:
@@ -3446,33 +3465,36 @@ def safe_int(value, default=0):
         return default
 
 # 1. 最新、最完整的標準結構範本（滿足目的 2：自動擴充）
+# Default template for stock data. Values are placeholders and will be filled in at runtime.
 DEFAULT_STOCK_STRUCTURE = {
-                'market_no': market_no,
-                'stock_name': stock_name,
-                'yst_price': yst_price,
-                'open_ref': open_ref,
-                'up_price': up_price,
-                'down_price': down_price,
-                'yst_vol': yst_vol,
-                'ext_name': ext_name,
-                'decimal': decimal,
-                'credit_pct': credit_pct,
-                'bond_pct': bond_pct,
-                # "new_feature_key": "default_value"  <-- 未來擴充直接加這               
-                'OpenPrice': safe_float(100.0),
-                'HighPrice': safe_float(110.0),
-                'LowPrice': safe_float(90.0),
-                'BuyPrice': safe_float(100.0),
-                'TotalOutVol' : safe_float(1000),
-                'SellPrice' : safe_float(100.0),
-                'TotalInVol' : safe_int(1000),
-                'DealPrice' : safe_float(100.0),
-                'TotalDealAmt' : safe_int(1000),
-                'uintVol' : safe_int(1000),    #單量內外盤標記
-                'singleVol' : safe_int(500), #單量
-                'TotalVol' : safe_int(10500),   #總成交量
-                'ytVolFlag' : safe_int(1) #單量內外盤標記
-                }
+    # 基本資訊，於運行時會被正確的值取代，預設為 None 防止 import 時 NameError
+    'market_no': None,
+    'stock_name': None,
+    'yst_price': None,
+    'open_ref': None,
+    'up_price': None,
+    'down_price': None,
+    'yst_vol': None,
+    'ext_name': None,
+    'decimal': None,
+    'credit_pct': None,
+    'bond_pct': None,
+    # "new_feature_key": "default_value"  <-- 未來擴充直接加這
+    # 下面的欄位使用安全的預設值，會在後續流程中被更新
+    'OpenPrice': safe_float(100.0),
+    'HighPrice': safe_float(110.0),
+    'LowPrice': safe_float(90.0),
+    'BuyPrice': safe_float(100.0),
+    'TotalOutVol': safe_float(1000),
+    'SellPrice': safe_float(100.0),
+    'TotalInVol': safe_int(1000),
+    'DealPrice': safe_float(100.0),
+    'TotalDealAmt': safe_int(1000),
+    'uintVol': safe_int(1000),    # 單量內外盤標記
+    'singleVol': safe_int(500),   # 單量
+    'TotalVol': safe_int(10500),  # 總成交量
+    'ytVolFlag': safe_int(1)      # 單量內外盤標記
+}
 
 
 

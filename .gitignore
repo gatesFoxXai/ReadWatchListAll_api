@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vs/
+.vscode/settings.json
+
+# Environment
+.claude_agent.env
+*.pfx
+
+# Logs
+*.log
+
+
+# Data — CSV files are runtime output, not source
+*.csv
+!yesterday/*.csv
+stock_ref.json
+.api_active
+.dashboard_pid
+snapshot/
+
+# Credentials
+accountEnv.json
+*github*.txt
+*密碼*.txt
+*金鑰*.txt
+*token*.txt
+
+# schedule
+Modify Summary.*
+tofuTool.*
+error/
+# Backup files
+*.bak
+
+# TODO: update_market_cap.py – 需要時間研究加強市值排名、前瞻 EPS、前瞻殖利率等功能，稍後再完善。
+
+# DLL (large binaries — uncomment if needed)
+# *.dll
+
+# OS
+.DS_Store
+Thumbs.db

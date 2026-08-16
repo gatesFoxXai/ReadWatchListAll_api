@@ -1,6 +1,6 @@
-timestamp,id_no,market_no,stock_id,stock_name,decimal,last_price,change,volume
-2026-08-12 23:38:35,88,Usage,python update_stock_names.py,2,1214.71,4.84,542174
-2026-08-12 23:50:12,41,Usage,python update_stock_names.py,2,1938.32,61.32,341147
-2026-08-13 01:03:09,48,Usage,python update_stock_names.py,2,921.15,47.46,7081
-2026-08-13 02:03:11,20,Usage,python update_stock_names.py,2,1738.77,-19.34,337328
-2026-08-13 02:05:46,75,Usage,python update_stock_names.py,2,1565.01,-94.75,587163
+日期時間,timestamp,id_no,market_no,stock_id,stock_name,decimal,last_price,change,volume
+2026-08-16 21:46:40,2026-08-12 23:38:35,88,Usage,python update_stock_names.py,2,1214.71,4.84,542174,
+2026-08-16 21:46:41,2026-08-12 23:50:12,41,Usage,python update_stock_names.py,2,1938.32,61.32,341147,
+2026-08-16 21:46:42,2026-08-13 01:03:09,48,Usage,python update_stock_names.py,2,921.15,47.46,7081,
+2026-08-16 21:46:43,2026-08-13 02:03:11,20,Usage,python update_stock_names.py,2,1738.77,-19.34,337328,
+2026-08-16 21:46:44,2026-08-13 02:05:46,75,Usage,python update_stock_names.py,2,1565.01,-94.75,587163,

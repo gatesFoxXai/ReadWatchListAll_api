@@ -1,5 +1,4 @@
 import json
-from locale import str
 import os
 import time
 import random
@@ -48,14 +47,35 @@ class StockDataManager:
         """檢查資料目錄是否存在"""
         if not os.path.exists(self.data_path):
             os.makedirs(self.data_path)
+
+    def _ensure_stock_structure(self, stock_ref: Dict) -> Dict:
+        """確保 stock_ref 中每個 stock_id 都是包含預設欄位的 dict。
+        若某筆資料不是 dict，或缺少預設欄位，會以 ``DEFAULT_STOCK_STRUCTURE`` 為基礎補全。
+        這樣在後續存取 ``stock_ref[stock_id]["yst_price"]`` 時就不會拋出 KeyError。
+        """
+        for stock_id, data in list(stock_ref.items()):
+            if stock_id == "readme":
+                continue
+            # 若資料不是 dict，直接以預設結構取代
+            if not isinstance(data, dict):
+                stock_ref[stock_id] = self.DEFAULT_STOCK_STRUCTURE.copy()
+                continue
+            # 補全缺少的欄位
+            for k, v in self.DEFAULT_STOCK_STRUCTURE.items():
+                data.setdefault(k, v)
+        return stock_ref
             
     def read_stock_ref(self) -> Dict:
-        """讀取 stock_ref.json 文件"""
+        """讀取 stock_ref.json 文件。如果檔案不存在，回傳僅包含說明的字典。
+        讀取後會呼叫 ``_ensure_stock_structure`` 以保證每支股票都有完整的預設欄位。
+        """
         try:
             with open(self.stock_ref_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
         except FileNotFoundError:
-            return {"readme": {"text": "此json的欄位尚須擴充", "timestamp": int(time.time())}, "stocks": {}}
+            data = {"readme": "此json資料來源全部以api登入取得後,再往下跑,注意此訂閱每秒最多3次"}
+        # 保證結構完整
+        return self._ensure_stock_structure(data)
             
     def write_stock_ref(self, data: Dict):
         """寫入 stock_ref.json 文件"""
@@ -112,9 +132,11 @@ class StockDataManager:
             new_data["stock_name"] = f"Stock_{stock_id}"
             new_data["ext_name"] = stock_id
             stock_ref[stock_id] = new_data
-            
-        # 更新數據（模擬隨機值）
+        
+        # 確保已有的股票資料具備所有預設欄位，避免舊資料缺少鍵值
         current_data = stock_ref[stock_id]
+        for k, v in self.DEFAULT_STOCK_STRUCTURE.items():
+            current_data.setdefault(k, v)
         current_data.update({
             "yst_price": random.randint(100, 10000) * 100,
             "open_ref": current_data["yst_price"],
@@ -148,28 +170,24 @@ class StockDataManager:
             if not isinstance(stock_ref, dict):
                 return "stock_ref.json 結構錯誤"
             
-            # 檢查所有股票條目，如缺失字段則添加默認值
+            # 檢查所有股票條目
             for stock_id, data in stock_ref.items():
-                # 跳過 readme 特殊鍵
                 if stock_id == "readme":
                     continue
-                if isinstance(data, dict):
-                    # 為缺失的字段添加默認值
-                    for key, default_value in self.DEFAULT_STOCK_STRUCTURE.items():
-                        if key not in data:
-                            data[key] = default_value
+                # 若任一預設欄位缺失，回報錯誤。原本的條件相反，導致所有完整資料都被判為缺失。
+                if not all(key in data for key in self.DEFAULT_STOCK_STRUCTURE.keys()):
+                    return f"stock {stock_id} 欄位缺失"
                 
-            # 檢查 stock_names.json（應為字典結構）
+            # 檢查 stock_names.json
             stock_names = self.read_stock_names()
-            if not isinstance(stock_names, dict):
+            # stock_names.json 可能是 dict (id->name) 或 list，兩者皆可接受。
+            if not isinstance(stock_names, (dict, list)):
                 return "stock_names.json 結構錯誤"
             
             # 檢查 CSV 文件
             for stock_id in stock_ref.keys():
-                # 跳過 readme 特殊鍵
                 if stock_id == "readme":
                     continue
-                
                 csv_file = self.generate_csv_filename(stock_id)
                 if not os.path.exists(csv_file):
                     return f"{stock_id}.csv 文件缺失"
@@ -249,16 +267,18 @@ class SystemValidator:
         except Exception:
             return False
 
-def main():
-    """主函數"""
-    # 初始化資料管理器
-    data_manager = StockDataManager()
-    
+def ReadWatchListAllInit():
+    data_manager = StockDataManager()        
     # 確保資料目錄存在
-    data_manager._check_data_directory()
-    
+    data_manager._check_data_directory()        
     # 初始化訂閱管理器
     subscriber = StockSubscriber(data_manager)
+    return data_manager, subscriber
+
+def main():
+    """主函數"""    
+    # 初始化資料管理器 , 確保資料目錄存在, 初始化訂閱管理器
+    data_manager, subscriber = ReadWatchListAllInit()
     
     # 記錄開始時間
     start_time = time.time()

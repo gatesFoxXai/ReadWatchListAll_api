@@ -1,0 +1,261 @@
+{
+  "updated": "2026-07-23T10:58:11.799896",
+  "used": "fetch_analyst_eps.py,",
+  "stocks": {
+    "2330": {
+      "name": "台積電",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 402.5,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": 90
+    },
+    "2317": {
+      "name": "鴻海",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 39.58,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": 15.5
+    },
+    "2344": {
+      "name": "華邦電",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 29.42,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": 16.96
+    },
+    "2610": {
+      "name": "華航",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 3.57,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": 1.84
+    },
+    "2609": {
+      "name": "陽明",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 8.6,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": 3.17
+    },
+    "2356": {
+      "name": "英業達",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 11.63,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": 3.06
+    },
+    "6412": {
+      "name": "群電",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 14.8,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": 6.85
+    },
+    "2354": {
+      "name": "鴻準",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 9.5,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": 3.8
+    },
+    "9907": {
+      "name": "統一實",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 2.52,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": null
+    },
+    "1522": {
+      "name": "堤維西",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 5.0,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": 0.61
+    },
+    "6770": {
+      "name": "力積電",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 11.85,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": null
+    },
+    "4958": {
+      "name": "臻鼎-KY",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 98.0,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": null
+    },
+    "2337": {
+      "name": "旺宏",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 23.92,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": null
+    },
+    "4536": {
+      "name": "拓凱",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 28.58,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": null
+    },
+    "4967": {
+      "name": "十銓",
+      "consensus_eps": 6.0,
+      "method": "median",
+      "all_estimates": [
+        6.0
+      ],
+      "source_count": 1,
+      "peg": {
+        "forward_eps": 6.0,
+        "trailing_eps": null,
+        "forward_pe": 38.83,
+        "eps_growth_pct": null,
+        "peg": null
+      },
+      "manual_eps": 100
+    }
+  }
+}
