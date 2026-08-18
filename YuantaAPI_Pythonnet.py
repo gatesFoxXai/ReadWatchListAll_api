@@ -4327,7 +4327,7 @@ async def show(update_interval: float = 1 / 60, save_interval: float = 5, subscr
         if "objYuantaOneAPI" in globals():
             print(f"[{dt.datetime.now()}] show() 啟動時呼叫 ReadWatchListAll_api() 設定漲跌停條件client{client}")
 
-            time.sleep(1)  # "等待登入中"
+            time.sleep(1.5)  # 官方建議延遲：後台仍需完成國內外期貨登入驗證（約3-5秒），1秒不夠
             while True:
                 if ReadWatchListAll_api(objYuantaOneAPI, client, isLogin):
                     print("呼叫成功")
