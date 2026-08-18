@@ -1,4 +1,92 @@
-版本記錄
+# 股票數據管理系統（OneAP_Python）
+
+## 現況（2026-08-18）
+
+### 系統架構（現行）
+
+```
+YuantaOneAPI.dll (元大 API)
+    │ pythonnet
+    ▼
+YuantaAPI_Pythonnet.py   ← 即時報價訂閱 + 5秒 CSV + 預估量 + 快照
+    ├── {code}.csv            5秒 OHLCV
+    ├── @{code}.csv          日總結（日K主來源）
+    ├── snapshot/{code}.json  Dashboard 0.5s 快照
+    └── stock_ref.json        漲跌停價（API 權威值）
+
+web_dashboard.py          ← Flask + SSE 即時面板 (port 5000)
+    顯示: 價格/漲跌停/PE/PB/PEG/主力散戶/估值帶(5檔)
+
+run.py                    ← 每日啟動器（API + Dashboard + 盤前檢查）
+sim_run.py                ← 非交易日模擬器
+```
+
+### 估值框架（個人投資方法，2026-08-18 實作）
+
+**核心原則：**
+- 前瞻指標是「假設」不是「事實」→ 用實際季 EPS 軌跡驗證
+- 倍數以「自己近 5 年歷史」為主（高權重），同業對照為輔
+- 聯準會升息/降息作為微調項
+- 價位「挑整幾碼」
+- **成長/成熟不是固定標籤**：成熟股可能因技術突破或換領導者而變成長股
+
+**兩種模式：**
+
+| 模式 | 公式 | 5 檔帶定義 |
+|------|------|-----------|
+| 成長型 (growth) | 共識EPS × PE中位數 × (1±fed) | 用 PE min~max 區間（與時俱進） |
+| 循環/成熟型 (cyclical) | 加權BPS × PBR中位數 | 固定倍數 0.6/0.8/1.0/1.3/1.6 |
+
+**5 檔：特價 / 便宜 / 合理 / 昂貴 / 瘋狂**
+
+**資料鏈：**
+```
+update_market_cap.py  → market_cap.json   (PE/PB/市值/分類 + 估值帶合併)
+update_financials.py  → stock_financials.json (近四季EPS/PEG)
+fetch_analyst_eps.py  → analyst_eps.json  (法人預估EPS)
+                        ↓
+              fundamentals.json (整合)
+                        ↓
+valuation.py          → valuation.json    (5檔價位帶)
+technical.py          → technical.json    (日K技術面指標)
+                        ↓
+              web_dashboard.py 顯示
+```
+
+### 技術面（日K為主，2026-08-18 實作）
+
+`technical.py` 依 `cStocks/SPEC.md` 公式：
+- MA5/MA20 + 多頭/空頭排列
+- 布林通道 (20日 ± 2σ)
+- MACD (12/26/9) + 金叉/死叉
+- KDJ (9/3/3) + 超買/超賣
+- 量比 + 大戶/散戶判定（每筆均量 > MA5×1.2）
+- 支撐/壓力（近 20 日高低點）
+
+**雙層架構：**
+- 日K = 決定「要不要做」（趨勢/估值帶位置）
+- 分K = 決定「什麼時候做」（盤中卡位/預估量）← 尚未整合
+
+### 已知限制
+
+1. `valuation_config.json` 的 pe_history/pb_history 是**佔位值**（當前 PE/PB），需填近 5 年真實區間
+2. 7 檔缺 forward_eps/eps_growth_pct → PEG 無法計算
+3. `@*.csv` 目前為模擬器資料，需真實盤中驗證
+4. `requirements.txt` 有無效的 `mplfonts>=2.4.2`
+5. 分K（1分鐘）技術面尚未整合
+
+---
+
+## 版本記錄
+
+v1.3.0 - 2026-08-18
+- 新增估值引擎 valuation.py（5檔價位帶：特價/便宜/合理/昂貴/瘋狂）
+- 成長型改用 PE min~max 區間定義 5 檔帶（與時俱進）
+- 新增技術面模組 technical.py（日K：MA/布林/MACD/KDJ/量比/支撐壓力）
+- update_market_cap.py 合併估值帶到 market_cap.json
+- Dashboard 顯示 5 檔估值帶
+- Agent渡 移至 .github/agents/agent-du.agent.md
+
 v1.2.0 - 2026-08-17
 - 新增前瞻 EPS、前瞻 PE、前瞻殖利率計算
 - 改善市值排名演算法，加入 Tier 分類與 Rank

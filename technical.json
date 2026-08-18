@@ -1,0 +1,157 @@
+{
+  "updated": "2026-08-18T18:20:13.948122",
+  "params": {
+    "ma": [
+      5,
+      20
+    ],
+    "boll": [
+      20,
+      2
+    ],
+    "macd": [
+      12,
+      26,
+      9
+    ],
+    "kdj": [
+      9,
+      3,
+      3
+    ]
+  },
+  "stocks": {
+    "2330": {
+      "status": "ok",
+      "date": "20260804",
+      "close": 2425.0,
+      "ma": {
+        "ma5": 2390.0,
+        "ma20": 2400.25
+      },
+      "boll": {
+        "lb": 2294.6,
+        "mid": 2400.25,
+        "ub": 2505.9
+      },
+      "macd": {
+        "dif": -7.929,
+        "dea": -10.219,
+        "hist": 4.582,
+        "state": "bullish",
+        "cross": "golden"
+      },
+      "kdj": {
+        "k": 66.8,
+        "d": 54.1,
+        "j": 92.1,
+        "zone": "neutral"
+      },
+      "volume": {
+        "ratio": 0.01,
+        "level": "light"
+      },
+      "whale": {
+        "whale": false,
+        "status": "散戶盤整"
+      },
+      "trend": {
+        "alignment": "mixed",
+        "boll_position": 0.62
+      },
+      "sr": {
+        "support": 2290.0,
+        "resistance": 2480.0
+      },
+      "days": 62
+    },
+    "2317": {
+      "status": "ok",
+      "date": "20260804",
+      "close": 250.5,
+      "ma": {
+        "ma5": 251.4,
+        "ma20": 242.05
+      },
+      "boll": {
+        "lb": 227.91,
+        "mid": 242.05,
+        "ub": 256.19
+      },
+      "macd": {
+        "dif": 1.192,
+        "dea": -1.022,
+        "hist": 4.428,
+        "state": "bullish",
+        "cross": null
+      },
+      "kdj": {
+        "k": 71.9,
+        "d": 70.6,
+        "j": 74.3,
+        "zone": "neutral"
+      },
+      "volume": {
+        "ratio": 1.54,
+        "level": "heavy"
+      },
+      "whale": {
+        "whale": false,
+        "status": "散戶盤整"
+      },
+      "trend": {
+        "alignment": "mixed",
+        "boll_position": 0.8
+      },
+      "sr": {
+        "support": 230.0,
+        "resistance": 259.0
+      },
+      "days": 63
+    },
+    "2344": {
+      "status": "ok",
+      "date": "20260804",
+      "close": 130.0,
+      "ma": {
+        "ma5": 148.2,
+        "ma20": 162.95
+      },
+      "boll": {
+        "lb": 133.55,
+        "mid": 162.95,
+        "ub": 192.35
+      },
+      "macd": {
+        "dif": -10.967,
+        "dea": -8.242,
+        "hist": -5.451,
+        "state": "bearish",
+        "cross": null
+      },
+      "kdj": {
+        "k": 16.4,
+        "d": 28.4,
+        "j": -7.5,
+        "zone": "oversold"
+      },
+      "volume": {
+        "ratio": 0.28,
+        "level": "light"
+      },
+      "whale": {
+        "whale": false,
+        "status": "散戶盤整"
+      },
+      "trend": {
+        "alignment": "bearish",
+        "boll_position": -0.06
+      },
+      "sr": {
+        "support": 130.0,
+        "resistance": 184.0
+      },
+      "days": 62
+    }
+  }
+}
