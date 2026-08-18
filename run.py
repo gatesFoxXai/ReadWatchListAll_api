@@ -561,6 +561,29 @@ def main():
                 api_proc.kill()
             print("[RUN] API 子程序已關閉")
 
+        # ---- 盤後自動轉換 1 分 K（供 cStocks 使用）----
+        try:
+            print("[RUN] 轉換 5 秒 CSV → 1 分 K (resample_1min.py --all) ...")
+            resample_proc = subprocess.run(
+                [sys.executable, "-B", "-X", "utf8", "resample_1min.py", "--all"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+            if resample_proc.returncode == 0:
+                print("[RUN] ✅ 1 分 K 轉換完成 → 1min/")
+            else:
+                print(f"[RUN] ⚠ 1 分 K 轉換有問題 (rc={resample_proc.returncode})")
+                if resample_proc.stderr:
+                    print(f"[RUN]   {resample_proc.stderr[:200]}")
+        except subprocess.TimeoutExpired:
+            print("[RUN] ⚠ 1 分 K 轉換逾時 (120s)")
+        except Exception as e:
+            print(f"[RUN] ⚠ 1 分 K 轉換失敗: {e}")
+
 
 if __name__ == "__main__":
     main()

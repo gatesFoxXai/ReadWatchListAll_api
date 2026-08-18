@@ -58,8 +58,20 @@ def resample_5sec_to_1min(stock_id, date_str=None, days=1, output_dir=None):
         print(f"[{stock_id}] 讀取失敗: {e}")
         return None
 
-    # 欄位名稱對齊（支援中英文）
-    col_map = {
+    # 欄位名稱對齊（支援實際 5 秒 CSV 格式 + 英文格式）
+    # 實際 CSV: 日期時間,stock_id,OpenPrice,HighPrice,LowPrice,BuyPrice,SellPrice,TotalOutVol,TotalInVol,DealPrice,TotalDealAmt,uintVol,singleVol,TotalVol
+    # 價格為 ×10000（API 原始值）
+    actual_col_map = {
+        "日期時間": "timestamp",
+        "OpenPrice": "open_price",
+        "HighPrice": "high_price",
+        "LowPrice": "low_price",
+        "DealPrice": "close_price",
+        "TotalVol": "deal_volume",
+        "TotalDealAmt": "deal_amount",
+    }
+    # 也支援英文格式（cStocks 輸出）
+    english_col_map = {
         "timestamp": "timestamp",
         "open_price": "open_price",
         "high_price": "high_price",
@@ -67,15 +79,34 @@ def resample_5sec_to_1min(stock_id, date_str=None, days=1, output_dir=None):
         "close_price": "close_price",
         "deal_volume": "deal_volume",
         "deal_amount": "deal_amount",
-        "trade_count": "trade_count",
     }
-    for col in col_map:
+
+    # 判斷是哪種格式
+    if "日期時間" in df.columns:
+        df = df.rename(columns=actual_col_map)
+        price_scale = 10000  # API 價格 ×10000
+    elif "timestamp" in df.columns:
+        price_scale = 1  # 已是正常價格
+    else:
+        print(f"[{stock_id}] 無法辨識 CSV 格式 (columns: {list(df.columns)[:5]}...)")
+        return None
+
+    # 確認必要欄位
+    required = ["timestamp", "open_price", "high_price", "low_price", "close_price", "deal_volume"]
+    for col in required:
         if col not in df.columns:
             print(f"[{stock_id}] 缺少欄位: {col}")
             return None
 
+    # 價格還原（÷10000）
+    if price_scale > 1:
+        for col in ["open_price", "high_price", "low_price", "close_price"]:
+            df[col] = df[col] / price_scale
+        if "deal_amount" in df.columns:
+            df["deal_amount"] = df["deal_amount"] / price_scale
+
     # 解析 timestamp → datetime
-    df["datetime"] = pd.to_datetime(df["timestamp"], format="%Y%m%d %H:%M:%S", errors="coerce")
+    df["datetime"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["datetime"])
 
     if len(df) == 0:
@@ -100,8 +131,14 @@ def resample_5sec_to_1min(stock_id, date_str=None, days=1, output_dir=None):
     df = df[~((df["datetime"].dt.hour == 13) & (df["datetime"].dt.minute > 30))]
 
     # 數值轉換
-    for col in ["open_price", "high_price", "low_price", "close_price", "deal_volume", "deal_amount", "trade_count"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    for col in ["open_price", "high_price", "low_price", "close_price", "deal_volume", "deal_amount"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    # trade_count 可能不存在（5 秒 CSV 無此欄位），補 0
+    if "trade_count" not in df.columns:
+        df["trade_count"] = 0
+    else:
+        df["trade_count"] = pd.to_numeric(df["trade_count"], errors="coerce").fillna(0)
 
     # 過濾無效資料（OHLC 全為 0 的 row）
     ohlc_cols = ["open_price", "high_price", "low_price", "close_price"]

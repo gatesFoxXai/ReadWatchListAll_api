@@ -30,10 +30,12 @@
   - 目前 `technical.py` 已可獨立產出，但 dashboard 尚未讀取
 
 - [ ] **分K（1分鐘）技術面**
-  - 資料來源：`1min/{code}_1min.csv`（由 `resample_1min.py` 從 5 秒 CSV 產生）
+  - ✅ 自動化：`run.py` 離開時自動執行 `resample_1min.py --all` → `1min/{code}_1min.csv`
+  - ✅ `resample_1min.py` 已修正欄位對齊（支援 5 秒 CSV 格式 + 價格 ÷10000）
   - 用途：盤中卡位、預估量、短線進出場
-  - 先確認日K穩定後再動態加入
-  - 可能需要在 `technical.py` 加 `--period 1min` 參數
+  - 待做：`technical.py` 加 `--period 1min` 參數，讀取 `1min/` 資料
+  - 待做：cStocks 合併 1 分 K 資料源
+  - 注意：模擬器資料時間戳不在 09:00~13:30，resample 會過濾掉（正常，真實盤中資料沒問題）
 
 - [ ] **預估量獨立模組**
   - 目前散落在 `YuantaAPI_Pythonnet.py` 的 `_update_estimates()`
@@ -45,7 +47,30 @@
   - 用戶框架：上半年用當年、下半年（7月起）用明年
   - 需加日期判斷或讓 config 明確指定
 
-## 🟢 低優先（改善/研究）
+## � BUG 追蹤
+
+- [ ] **cStocks.py 繪圖殘留 + 效能**
+  - 問題 1：日 K 上的繪圖物件（標註/線條），切換到週 K / 1 分 K 時殘留未清除
+  - 修法：切走時 → 保存繪圖狀態到 `{code}_drawings.json` + 清除 axes 上的 artist；切回日 K 時 → 從 JSON 恢復
+  - 問題 2：繪圖物件多時效能不佳（重繪慢）
+  - 修法：封裝繪圖邏輯（獨立 class 或 mixin），優化重繪策略（增量更新 vs 全量重繪）
+  - 位置：`cStocks/cStocks.py` → `_setup_drawing_ui` / `_draw_save` / `_draw_load` / `_draw_artist_from_obj`
+  - 優先級：中（不影響數據正確性，影響使用體驗）
+
+- [ ] **EMAIL 發送腳本讀不到參數**
+  - 位置：`run.py` 每週自動發報告功能
+  - 症狀：發送腳本無法讀取參數，原因不明
+  - 影響：每週報告可能未成功發送
+  - 優先級：低（不影響核心功能）
+  - 排查方向：檢查 `send_email.py` / `issue_report_email.py` 的參數傳遞、環境變數、排程觸發方式
+
+- [ ] **EPS 命名/語義不清（維護性問題）**
+  - `analyst_eps.json` 的 `consensus_eps: 90` 看不出是「哪一年、誰的、何時的」
+  - 背景：6/30 後改用法人明年估值；Q2 法說後新估值上調但未更新
+  - 建議：欄位改名或加 `as_of` / `fiscal_year` 欄位，讓維護時一眼看懂
+  - 例：`"consensus_eps": 90, "fiscal_year": 2026, "as_of": "2026-08-17", "note": "Q2法說前估值，待更新"`
+
+## �🟢 低優先（改善/研究）
 
 - [ ] **Notebook 研究選股法**
   - 近 5 年 EPS 軌跡視覺化（加速/放緩/轉折）
