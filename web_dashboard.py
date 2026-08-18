@@ -243,6 +243,17 @@ h1{font-size:20px;margin-bottom:12px;color:#58a6ff}
 .depth-table th{color:#8b949e;font-weight:normal;text-align:right;padding:1px 4px}
 .depth-table td{text-align:right;padding:1px 4px;font-variant-numeric:tabular-nums}
 .depth-table .bid{color:#3fb950}.depth-table .ask{color:#f85149}
+.val-band{display:flex;align-items:center;gap:2px;margin-top:6px;font-size:10px}
+.val-band .seg{flex:1;height:6px;border-radius:2px;position:relative}
+.val-band .seg.special{background:#238636}.val-band .seg.cheap{background:#56d364}
+.val-band .seg.fair{background:#d29922}.val-band .seg.expensive{background:#f85149}
+.val-band .seg.crazy{background:#da3633}
+.val-band .marker{position:absolute;top:-3px;width:2px;height:12px;background:#fff;border:1px solid #000}
+.val-labels{display:flex;justify-content:space-between;font-size:9px;color:#8b949e;margin-top:2px}
+.val-tier{font-size:10px;padding:1px 6px;border-radius:8px;font-weight:600}
+.val-tier.special{background:#238636;color:#fff}.val-tier.cheap{background:#56d364;color:#000}
+.val-tier.fair{background:#d29922;color:#000}.val-tier.expensive{background:#f85149;color:#fff}
+.val-tier.crazy{background:#da3633;color:#fff}
 .stale{color:#f85149}.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}.status-dot.live{background:#3fb950;box-shadow:0 0 6px #3fb950}.status-dot.stale{background:#f85149;box-shadow:0 0 6px #f85149}.status-dot.dead{background:#6e7681}
 </style>
 </head>
@@ -333,6 +344,23 @@ function badge(type){
   const [label,cls]=m[type]||['--',''];
   return `<span class="${cls}">${label}</span>`;
 }
+const VAL_TIER_LABEL={special:'特價',cheap:'便宜',fair:'合理',expensive:'昂貴',crazy:'瘋狂'};
+function valBand(s){
+  const v=s.valuation;
+  if(!v||!v.bands) return '';
+  const b=v.bands, close=s.close_price;
+  const lo=Math.min(b.special,b.cheap,b.fair,b.expensive,b.crazy);
+  const hi=Math.max(b.special,b.cheap,b.fair,b.expensive,b.crazy);
+  const range=hi-lo;
+  const pos=close!=null?Math.min(100,Math.max(0,(close-lo)/range*100)):null;
+  const tier=v.current_tier?VAL_TIER_LABEL[v.current_tier]:'--';
+  const marker=pos!=null?`<div class="marker" style="left:${pos}%"></div>`:'';
+  return `<div class="val-band" title="合理價 ${b.fair}｜目前 ${close!=null?close:'--'}">
+    <div class="seg special">${marker}</div><div class="seg cheap"></div><div class="seg fair"></div><div class="seg expensive"></div><div class="seg crazy"></div>
+  </div>
+  <div class="val-labels"><span>特價${b.special}</span><span>便宜${b.cheap}</span><span>合理${b.fair}</span><span>昂貴${b.expensive}</span><span>瘋狂${b.crazy}</span></div>
+  <div class="row" style="margin-top:2px"><span class="val-tier ${v.current_tier||''}">${tier}</span><span class="muted" style="font-size:10px">${v.mode==='cyclical'?'PBR':'PE'} 估值</span></div>`;
+}
 function tag(label){
   const map={主力強力買進:['強力買進','tag-strong-buy'],主力溫和買進:['溫和買進','tag-buy'],
              散戶盤整:['盤整','tag-churn'],主力溫和賣出:['溫和賣出','tag-sell'],
@@ -419,6 +447,7 @@ function cardHTML(s){
 <div class="row"><span>${s.volume_label||'估日量'} ${vol(s.estimated_day_volume)} 張</span><span class="muted">${s.pct_of_yesterday_avg!=null?(s.pct_of_yesterday_avg>=0?'增':'縮')+Math.abs(s.pct_of_yesterday_avg).toFixed(1)+'%':'--'}</span></div>
 <div class="row"><span>MA5 ${fmt(s.ma5)}</span><span class="muted">MA10 ${fmt(s.ma10)}</span><span>${tag(s.participation_label||'N/A')}</span></div>
 <div class="row" style="font-size:11px"><span class="${s.pe_source==='forward'?'up':'muted'}" title="${s.pe_source==='forward'?'本益比使用法人預估EPS':(s.pe_source==='trailing'?'本益比使用近四季EPS':'無EPS資料')}">PE ${fmt(s.pe,1)||"--"}</span>${s.pe_revision==='up'?'<span class="up" style="font-size:9px;margin-left:2px">上修</span>':s.pe_revision==='down'?'<span class="down" style="font-size:9px;margin-left:2px">下修</span>':''}<span class="muted" title="${s.peg_note||""}"> PB ${fmt(s.pb,2)||"--"} PEG ${fmt(s.peg,2)||"--"}</span></div>
+${valBand(s)}
 <div class="bar"><div class="bar-fill" style="width:${Math.min(100,Math.max(0,inRatio))}%;background:${inRatio>55?'#3fb950':inRatio<45?'#f85149':'#6e7681'}"></div></div>
 <div class="row"><span class="muted">買盤佔比 ${inRatio}%</span><span class="muted">Score: ${s.participation_score||'--'}</span></div>
 <div class="stat-row"><span>${(s.timestamp|| '').slice(-8)}</span><span>成交總額 ${amt(dealAmt)} / ${vol(dealVol)}張</span></div>
@@ -611,6 +640,8 @@ def read_snapshot(stock_id: str) -> dict | None:
         d["pe"], d["pb"], d["peg"], d["peg_note"], d["pe_source"], d["pe_revision"] = _compute_pe_pb_peg(
             d.get("close_price"), fund
         )
+        # 5 檔估值帶（valuation.json）
+        d["valuation"] = _VALUATION.get(stock_id)
         # 盤後 (14:00+): 用 @stockID.csv 覆蓋 OHLCV + records
         from datetime import datetime as _dt
 
@@ -1076,6 +1107,31 @@ def _compute_pe_pb_peg(close_price, fund):
 
 _LAST_KNOWN = {}
 _FUND = _load_fundamentals()
+
+
+_VALUATION_CACHE = None
+_VALUATION_CACHE_TIME = 0
+
+
+def _load_valuation() -> dict:
+    """載入 valuation.json（5 檔估值帶）。含 1 小時快取。"""
+    global _VALUATION_CACHE, _VALUATION_CACHE_TIME
+    now = time.time()
+    if _VALUATION_CACHE is not None and now - _VALUATION_CACHE_TIME < 3600:
+        return _VALUATION_CACHE
+    path = "valuation.json"
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                _VALUATION_CACHE = json.load(f).get("stocks", {})
+            _VALUATION_CACHE_TIME = now
+            return _VALUATION_CACHE
+        except Exception:
+            pass
+    return {}
+
+
+_VALUATION = _load_valuation()
 
 
 def _detect_stock_type(stock_id: str, price=None) -> str:

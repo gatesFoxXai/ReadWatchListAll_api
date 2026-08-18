@@ -1,0 +1,84 @@
+{
+  "_readme": "估值引擎設定。type: growth(成長/科技,用PE) | cyclical(景氣循環/房產,用PBR)。pe_history/pb_history 的 min/median/max 應填「該股自身歷史」區間（高權重），目前以當前值佔位，請依你的歷史數據修正。fed_adjustment: 聯準會升息/降息微調（+0.1=降息給高一點, -0.1=升息收緊）。tiers: 5檔倍數，錨定合理價=1.0。",
+  "2330": {
+    "type": "growth",
+    "pe_history": { "min": 18, "median": 26.6, "max": 35 },
+    "fed_adjustment": 0.0
+  },
+  "2317": {
+    "type": "growth",
+    "pe_history": { "min": 10, "median": 16.7, "max": 25 },
+    "fed_adjustment": 0.0
+  },
+  "2344": {
+    "type": "cyclical",
+    "pb_history": { "min": 1.5, "median": 7.0, "max": 12 },
+    "bps_history": [20, 22, 24, 25.92],
+    "fed_adjustment": 0.0
+  },
+  "2610": {
+    "type": "cyclical",
+    "pb_history": { "min": 0.8, "median": 1.18, "max": 2.0 },
+    "bps_history": [14, 15, 16, 16.84],
+    "fed_adjustment": 0.0
+  },
+  "2609": {
+    "type": "cyclical",
+    "pb_history": { "min": 0.4, "median": 0.55, "max": 1.2 },
+    "bps_history": [80, 88, 92, 94.2],
+    "fed_adjustment": 0.0
+  },
+  "2356": {
+    "type": "growth",
+    "pe_history": { "min": 15, "median": 22.8, "max": 35 },
+    "fed_adjustment": 0.0
+  },
+  "6412": {
+    "type": "growth",
+    "pe_history": { "min": 8, "median": 11.6, "max": 20 },
+    "fed_adjustment": 0.0
+  },
+  "2354": {
+    "type": "growth",
+    "pe_history": { "min": 10, "median": 16.4, "max": 28 },
+    "fed_adjustment": 0.0
+  },
+  "9907": {
+    "type": "growth",
+    "pe_history": { "min": 15, "median": 25, "max": 40 },
+    "fed_adjustment": 0.0
+  },
+  "1522": {
+    "type": "growth",
+    "pe_history": { "min": 20, "median": 29.4, "max": 50 },
+    "fed_adjustment": 0.0
+  },
+  "6770": {
+    "type": "cyclical",
+    "pb_history": { "min": 1.5, "median": 2.73, "max": 5 },
+    "bps_history": [22, 24, 26, 27.33],
+    "fed_adjustment": 0.0
+  },
+  "4958": {
+    "type": "growth",
+    "pe_history": { "min": 30, "median": 59.5, "max": 90 },
+    "fed_adjustment": 0.0
+  },
+  "2337": {
+    "type": "cyclical",
+    "pb_history": { "min": 2, "median": 4.14, "max": 8 },
+    "bps_history": [25, 28, 30, 31.28],
+    "fed_adjustment": 0.0
+  },
+  "4536": {
+    "type": "growth",
+    "pe_history": { "min": 8, "median": 12.6, "max": 22 },
+    "fed_adjustment": 0.0
+  },
+  "4967": {
+    "type": "cyclical",
+    "pb_history": { "min": 1.2, "median": 2.01, "max": 4 },
+    "bps_history": [110, 120, 128, 131.09],
+    "fed_adjustment": 0.0
+  }
+}
