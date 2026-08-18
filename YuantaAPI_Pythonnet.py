@@ -3684,10 +3684,13 @@ def ReadWatchListAll_api(yuanta, clien, isLogin):
     if (int)(loginStatus.value) < (int)(EnumLoginStatusType.LOGIN_SUCCESS.value):
         return False
 
-    # 若當前非交易時段，直接返回 False，避免不必要的 API 呼叫
+    # 若已收盤，直接返回 False，避免不必要的 API 呼叫。
+    # 注意: _market_phase() 回傳英文 ('pre_open'/'trading'/'matching'/'closed')，
+    # 過去誤用中文「開盤」比對，導致此函式永遠回傳 False、ReadWatchListAll_Out 永不觸發，
+    # stock_ref.json 因此未被真實 API 資料更新（漲跌停價不合理之根因）。
     try:
         market_phase = _market_phase()
-        if market_phase != "開盤":
+        if market_phase == "closed":
             logging.info(f"Market phase '{market_phase}' – Skip ReadWatchListAll_api")
             return False
     except Exception as e:
