@@ -158,22 +158,54 @@ def _current_tier(close, bands):
 
 
 def compute_growth(code, close, fund, analyst, cfg):
-    """成長/科技股：共識EPS × 自身歷史PE中位數 × (1±fed調整)。"""
+    """成長/科技股：共識EPS × 自身歷史PE區間 × (1±fed調整)。
+
+    成長型 PE 範圍會隨成長階段移動（與時俱進），
+    因此 5 檔帶用該股自身的 pe_history.min~max 定義邊界：
+      特價   = eps × pe_min × (1+fed)
+      便宜   = eps × (pe_min + pe_median) / 2 × (1+fed)
+      合理   = eps × pe_median × (1+fed)
+      昂貴   = eps × (pe_median + pe_max) / 2 × (1+fed)
+      瘋狂   = eps × pe_max × (1+fed)
+
+    若 min/max 未設定，fallback 到固定倍數 (0.6~1.6)。
+    """
     eps, eps_src = get_consensus_eps(code, fund, analyst)
-    pe = (cfg.get("pe_history") or {}).get("median")
-    if not eps or not pe:
+    pe_hist = cfg.get("pe_history") or {}
+    pe_median = pe_hist.get("median")
+    pe_min = pe_hist.get("min")
+    pe_max = pe_hist.get("max")
+    if not eps or not pe_median:
         return None
     fed = cfg.get("fed_adjustment", 0.0)
-    fair = eps * pe * (1 + fed)
-    tiers = {**DEFAULT_TIERS, **(cfg.get("tiers") or {})}
-    bands = _apply_tiers(fair, tiers)
+    adj = 1 + fed
+
+    # 成長型：用 min/median/max 定義 5 檔（與時俱進）
+    if pe_min and pe_max and pe_min < pe_median < pe_max:
+        bands = {
+            "special": round_to_nice(eps * pe_min * adj),
+            "cheap": round_to_nice(eps * (pe_min + pe_median) / 2 * adj),
+            "fair": round_to_nice(eps * pe_median * adj),
+            "expensive": round_to_nice(eps * (pe_median + pe_max) / 2 * adj),
+            "crazy": round_to_nice(eps * pe_max * adj),
+        }
+        band_method = "pe_range"
+    else:
+        # fallback：固定倍數
+        fair = eps * pe_median * adj
+        tiers = {**DEFAULT_TIERS, **(cfg.get("tiers") or {})}
+        bands = _apply_tiers(fair, tiers)
+        band_method = "fixed_mult"
+
     return {
         "mode": "growth",
         "eps": eps,
         "eps_source": eps_src,
-        "pe_anchor": pe,
+        "pe_anchor": pe_median,
+        "pe_range": {"min": pe_min, "max": pe_max},
         "fed_adjustment": fed,
-        "fair_raw": round(fair, 2),
+        "band_method": band_method,
+        "fair_raw": round(eps * pe_median * adj, 2),
         "bands": bands,
         "current_tier": _current_tier(close, bands),
     }

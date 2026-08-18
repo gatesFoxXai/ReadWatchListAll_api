@@ -1,5 +1,5 @@
 {
-  "_readme": "估值引擎設定。type: growth(成長/科技,用PE) | cyclical(景氣循環/房產,用PBR)。pe_history/pb_history 的 min/median/max 應填「該股自身歷史」區間（高權重），目前以當前值佔位，請依你的歷史數據修正。fed_adjustment: 聯準會升息/降息微調（+0.1=降息給高一點, -0.1=升息收緊）。tiers: 5檔倍數，錨定合理價=1.0。",
+  "_readme": "估值引擎設定（近 5 年窗口）。\n\n【type】growth(成長/科技,用PE) | cyclical(景氣循環/房產,用PBR)\n  - type 不是永久標籤！成熟股可能因技術突破或換領導者而變成長股，反之亦然。\n  - 判斷依據：近 5 年 EPS 趨勢（加速/穩定/放緩/轉折）。\n  - 隨時可改，改完重跑 valuation.py 即可。\n\n【pe_history / pb_history】min/median/max = 該股近 5 年自身倍數區間（高權重）\n  - 成長型：5 檔帶由 min~max 定義邊界（與時俱進，PE 範圍會隨成長階段移動）\n  - 循環/成熟型：5 檔帶 = median × 固定倍數(0.6/0.8/1.0/1.3/1.6)\n  - 目前以當前值佔位，請依你的 5 年數據修正。\n\n【fed_adjustment】聯準會升息/降息微調（+0.1=降息給高一點, -0.1=升息收緊）\n\n【tiers】5 檔倍數（僅循環/成熟型使用），錨定合理價=1.0。\n\n【eps_trend】（選填）accelerating | stable | decelerating | turning\n  - 影響你選的 PE 錨點偏高或偏低（加速→給高，放緩→給低）\n  - 目前為人工判斷，程式不自動計算。",
   "2330": {
     "type": "growth",
     "pe_history": { "min": 18, "median": 26.6, "max": 35 },
