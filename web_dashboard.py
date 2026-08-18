@@ -1,6 +1,7 @@
 """Web Dashboard — 即時多股監控畫面 (Flask + SSE)
 Usage: python web_dashboard.py [--port 5000]
 """
+
 import argparse
 import csv
 import json
@@ -14,12 +15,16 @@ from option_pricing import OptionPricing, put_call_ratio_analysis
 import hedge_dashboard
 
 app = Flask(__name__)
+
+
 @app.after_request
 def _no_cache(response):
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+
+
 hedge_dashboard.register(app)
 sse_queue = queue.Queue()
 
@@ -28,14 +33,17 @@ WATCHLIST_META_PATH = "watchlist_meta.json"
 NAMES_PATH = "stock_names.json"
 _active_watchlist = "自選股1"
 
+
 def load_names():
     if os.path.exists(NAMES_PATH):
         with open(NAMES_PATH, encoding="utf-8") as f:
             return json.load(f)
     return {}
 
+
 def get_stock_name(stock_id: str) -> str:
     return load_names().get(stock_id, stock_id)
+
 
 def load_watchlist_meta():
     if os.path.exists(WATCHLIST_META_PATH):
@@ -47,8 +55,10 @@ def load_watchlist_meta():
             return {}
     return {}
 
+
 _market_cap_cache = None
 _market_cap_cache_time = 0
+
 
 def _load_market_cap():
     global _market_cap_cache, _market_cap_cache_time
@@ -66,6 +76,7 @@ def _load_market_cap():
             pass
     return None
 
+
 def _guess_market_from_market_cap(stock_id: str) -> str | None:
     cap = _load_market_cap()
     if not cap:
@@ -79,6 +90,7 @@ def _guess_market_from_market_cap(stock_id: str) -> str | None:
     if market == "OTC":
         return "TWOTC"
     return None
+
 
 def _normalize_watchlist_entry(entry: dict) -> dict:
     if not isinstance(entry, dict):
@@ -110,11 +122,17 @@ def _normalize_watchlist_entry(entry: dict) -> dict:
     entry["stocks"] = normalized_stocks
     entry["TWOTC"] = normalized_twotc
     entry["futures"] = futures
-    return entry    
+    return entry
+
 
 def load_watchlists():
-    default = {"自選股1": {"stocks": ["2330", "2317", "2344"], "futures": ['TFX8','TXFPM1'],"TWOTC":[
-        "6123","8936","6122","3293","6143","8069"]}}
+    default = {
+        "自選股1": {
+            "stocks": ["2330", "2317", "2344"],
+            "futures": ["TFX8", "TXFPM1"],
+            "TWOTC": ["6123", "8936", "6122", "3293", "6143", "8069"],
+        }
+    }
     if os.path.exists(WATCHLIST_PATH):
         try:
             with open(WATCHLIST_PATH, encoding="utf-8") as f:
@@ -137,9 +155,11 @@ def load_watchlists():
             return default
     return default
 
+
 def get_active_watchlist_entry():
     wl = load_watchlists()
     return wl.get(_active_watchlist, wl.get("自選股1", {"stocks": [], "TWOTC": []}))
+
 
 def get_active_stocks():
     entry = get_active_watchlist_entry()
@@ -150,6 +170,7 @@ def get_active_stocks():
         if sid not in combined:
             combined.append(sid)
     return combined
+
 
 STOCKS = get_active_stocks()
 DATA_INTERVAL = 0.33
@@ -194,6 +215,12 @@ h1{font-size:20px;margin-bottom:12px;color:#58a6ff}
   .market-TWOTCODD{background:#06b6d4}
   .market-SGX{background:#64748b}
   .market-CFE{background:#b91c1c}
+    /* 新增的變化類型標籤 */
+    .tag-new{background:#ff4d4f;color:#fff}
+    .tag-downgrade{background:#2e7d32;color:#fff}
+    .tag-exit-mid{background:#6e7681;color:#fff}
+    /* 大額成交列顏色 */
+    .record-large{background:#ffeb3b;}
 .wl-groups{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .wl-group{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;flex:1 1 240px;min-width:180px}
 .wl-group h4{font-size:12px;color:#8b949e;margin-bottom:6px}
@@ -329,12 +356,22 @@ function cardHTML(s){
   const dealAmt=s.deal_amount||0, dealVol=s.deal_volume||0;
   let recs='';
   if(s._records&&s._records.length){
-    recs='<table class="depth-table" style="margin-top:4px"><tr><th>時間</th><th>成交價</th><th>量(張)</th><th>內盤</th><th>外盤</th><th>金額</th></tr>';
-    for(const r of s._records){
-      if((r.vol||0)===0&&(r.in_vol||0)===0&&(r.out_vol||0)===0)continue;
-      recs+=`<tr><td>${r.time||'--'}</td><td>${fmt(r.price)}</td><td>${vol(r.vol)}</td><td>${vol(r.in_vol)}</td><td>${vol(r.out_vol)}</td><td>${amt(r.amt)}</td></tr>`;
-    }
-    recs+='</table>';
+        const LARGE_VOL = 1000; // threshold for large volume rows (in 張)
+        const LARGE_AMT = 1_000_000; // threshold for large amount rows (in 金額)
+        const LARGE_PRICE = 10_000; // threshold for large price per share (in 元)
+        recs='<table class="depth-table" style="margin-top:4px"><tr><th>時間</th><th>成交價</th><th>量(張)</th><th>內盤</th><th>外盤</th><th>金額</th></tr>';
+        for(const r of s._records){
+            // Skip rows that have no volume and no price information.
+            if((r.vol||0)===0 && (r.in_vol||0)===0 && (r.out_vol||0)===0 && (r.price==null || Number(r.price)===0)) continue;
+            // 標記為 large 的條件：
+            //   1. 成交量 > LARGE_VOL 且 > 1（避免單筆 1 張被誤判）
+            //   2. 金額 > LARGE_AMT
+            //   3. 單筆股價 >= LARGE_PRICE（例如 1 張價格 >= 10,000 元）
+            const priceNum = Number(r.price) || 0;
+            const volCls = (((r.vol||0) > LARGE_VOL && (r.vol||0) > 1) || (r.amt||0) > LARGE_AMT || priceNum >= LARGE_PRICE) ? 'record-large' : '';
+            recs+=`<tr class="${volCls}"><td>${r.time||'--'}</td><td>${fmt(r.price)}</td><td>${vol(r.vol)}</td><td>${vol(r.in_vol)}</td><td>${vol(r.out_vol)}</td><td>${amt(r.amt)}</td></tr>`;
+        }
+        recs+='</table>';
   }
   let marketTag = '';
   try{
@@ -370,6 +407,10 @@ function cardHTML(s){
   }catch(e){ }
   const uid='r'+s.stock_id;
 	  const recsOpen = _recsOpen ? ' open' : '';
+    // 變化類型標籤 (new, downgrade, exit-mid)
+    const changeMap = {new:'tag-new',downgrade:'tag-downgrade',exit_mid:'tag-exit-mid'};
+    const changeCls = changeMap[s.change_type]||'';
+    const changeLabel = s.change_type ? `<span class="${changeCls}">${s.change_type}</span>` : '';
   return `<h2>${s.stock_name||s.stock_id} <span>${s.stock_id}</span> <span>${badge(s.stock_type)}</span> ${marketTag}<button onclick="removeStock('${s.stock_id}')" title="移除" style="float:right;background:none;border:none;color:#8b949e;cursor:pointer;font-size:16px;padding:0 4px">×</button></h2>
 <div class="price ${cls}${limitCls}">${fmt(s.close_price)} ${limitLabel} <span style="font-size:13px">${chgPct>0?'+'+chgPct:chgPct}%</span></div>
 <div class="row"><span>開 ${fmt(s.open_price)}</span><span>高 ${fmt(s.high_price)}</span><span>低 ${fmt(s.low_price)}</span></div>
@@ -533,13 +574,17 @@ def read_snapshot(stock_id: str) -> dict | None:
             "sell_total_volume": max(0, snap.get("sell_total_volume", 0) or 0),
             "buy_sell_imbalance": snap.get("buy_sell_imbalance"),
             # 優先使用累積值（API 提供的總成交金額/總量），區間值作為降級
-            "deal_amount": snap.get("cumulative_deal_amount") if snap.get("cumulative_deal_amount") is not None else snap.get("deal_amount"),
+            "deal_amount": snap.get("cumulative_deal_amount")
+            if snap.get("cumulative_deal_amount") is not None
+            else snap.get("deal_amount"),
             "close_price": snap.get("close_price"),
             "open_price": snap.get("open_price"),
             "high_price": snap.get("high_price"),
             "low_price": snap.get("low_price"),
             "price_diff": snap.get("price_diff"),
-            "deal_volume": snap.get("cumulative_deal_volume") if snap.get("cumulative_deal_volume") is not None else max(0, snap.get("deal_volume", 0) or 0),
+            "deal_volume": snap.get("cumulative_deal_volume")
+            if snap.get("cumulative_deal_volume") is not None
+            else max(0, snap.get("deal_volume", 0) or 0),
             "trade_count": snap.get("trade_count"),
             "total_in_volume": max(0, snap.get("total_in_volume", 0) or 0),
             "total_out_volume": max(0, snap.get("total_out_volume", 0) or 0),
@@ -553,16 +598,22 @@ def read_snapshot(stock_id: str) -> dict | None:
             "participation_score": snap.get("participation_score"),
             "participation_label": snap.get("participation_label", ""),
             # 財務數據 (PE/PB/PEG)
-            "pe": None, "pb": None, "peg": None, "peg_note": "",
+            "pe": None,
+            "pb": None,
+            "peg": None,
+            "peg_note": "",
             "ref_price": _get_ref_price(stock_id, snap.get("open_price")),
             "limit_state": _calc_limit_state(snap.get("close_price"), stock_id),
             "_records": snap.get("records", []),
         }
         # PE/PB/PEG from live price + static fundamentals（在 close_price 覆蓋後計算）
         fund = _FUND.get(stock_id)
-        d["pe"], d["pb"], d["peg"], d["peg_note"], d["pe_source"], d["pe_revision"] = _compute_pe_pb_peg(d.get("close_price"), fund)
+        d["pe"], d["pb"], d["peg"], d["peg_note"], d["pe_source"], d["pe_revision"] = _compute_pe_pb_peg(
+            d.get("close_price"), fund
+        )
         # 盤後 (14:00+): 用 @stockID.csv 覆蓋 OHLCV + records
         from datetime import datetime as _dt
+
         if _dt.now().hour >= 14:
             if not d["_records"]:
                 d["_records"] = _recent_rows_api(stock_id, n=10)
@@ -586,13 +637,17 @@ def read_snapshot(stock_id: str) -> dict | None:
                 d["deal_volume"] = actual_vol
                 d["deal_amount"] = int(actual_vol * d["close_price"]) if d.get("close_price") else None
             # 盤後重算 PE/PB/PEG（用收盤價）
-            d["pe"], d["pb"], d["peg"], d["peg_note"], d["pe_source"], d["pe_revision"] = _compute_pe_pb_peg(d.get("close_price"), fund)
+            d["pe"], d["pb"], d["peg"], d["peg_note"], d["pe_source"], d["pe_revision"] = _compute_pe_pb_peg(
+                d.get("close_price"), fund
+            )
         # 補救 stock_type
         if not d["stock_type"] or d["stock_type"] == "unknown":
             d["stock_type"] = _detect_stock_type(stock_id, d["close_price"])
         # 補救 participation
         if d["participation_label"] in ("", "N/A", "等待資料") and d["total_in_volume"] + d["total_out_volume"] > 0:
-            d["participation_score"] = round((d["total_in_volume"] - d["total_out_volume"]) / (d["total_in_volume"] + d["total_out_volume"]) * 50, 1)
+            d["participation_score"] = round(
+                (d["total_in_volume"] - d["total_out_volume"]) / (d["total_in_volume"] + d["total_out_volume"]) * 50, 1
+            )
             d["participation_label"] = _score_to_label(d["participation_score"])
         return d
     except Exception:
@@ -603,6 +658,7 @@ def read_latest_csv(stock_id: str) -> dict | None:
     """讀取最新 CSV 資料（作為 snapshot 不存在時的降級方案）。
     盤後(14:00+)若 snapshot 無有效價格，無條件從 CSV/@stockID 補齊。"""
     from datetime import datetime as _dt
+
     is_after_close = _dt.now().hour >= 14
     # 優先讀取 snapshot（0.5 秒更新，1KB 小檔案）
     snap = read_snapshot(stock_id)
@@ -677,6 +733,7 @@ def read_latest_csv(stock_id: str) -> dict | None:
             if total_in + total_out > 0:
                 participation_score = round((total_in - total_out) / (total_in + total_out) * 50, 1)
                 participation_label = _score_to_label(participation_score)
+
         def _normalize_volume(val):
             if val is None:
                 return None
@@ -720,7 +777,9 @@ def read_latest_csv(stock_id: str) -> dict | None:
             "stock_type": stock_type,
             "timestamp": row.get("timestamp", ""),
             "participation_score": participation_score,
-            "participation_label": participation_label if participation_label not in ("", "N/A", "等待資料") else "等待資料",
+            "participation_label": participation_label
+            if participation_label not in ("", "N/A", "等待資料")
+            else "等待資料",
             "ref_price": _get_ref_price(stock_id, open_price),
             "limit_state": _calc_limit_state(close_price, stock_id),
         }
@@ -744,7 +803,9 @@ def read_latest_csv(stock_id: str) -> dict | None:
             d["limit_state"] = _calc_limit_state(d["close_price"], stock_id)
         # PE/PB/PEG from live price + static fundamentals（在 close_price 覆蓋後計算）
         fund = _FUND.get(stock_id)
-        d["pe"], d["pb"], d["peg"], d["peg_note"], d["pe_source"], d["pe_revision"] = _compute_pe_pb_peg(d.get("close_price"), fund)
+        d["pe"], d["pb"], d["peg"], d["peg_note"], d["pe_source"], d["pe_revision"] = _compute_pe_pb_peg(
+            d.get("close_price"), fund
+        )
         # 盤後用 actual_vol 覆蓋 deal_volume/deal_amount
         if actual_vol and actual_vol > (d.get("deal_volume") or 0):
             d["deal_volume"] = actual_vol
@@ -757,7 +818,10 @@ def read_latest_csv(stock_id: str) -> dict | None:
     except Exception:
         return None
 
-#val必須為無符號,避免負值影響計算,目前方法存在瑕疵,為 bug 原因之一需修正
+
+# val必須為無符號,避免負值影響計算,目前方法存在瑕疵,為 bug 原因之一需修正
+
+
 def _normalize_price(val):
     """將可能為 API 原始整數的價格正規化為 TWD。
     台灣個股價格合理範圍 1~15000，若超過 100000 視為原始整數 (/10000)；
@@ -795,7 +859,8 @@ def _get_ref_price(stock_id: str, fallback_open=None):
     yst = _normalize_price(entry.get("yst_price"))
     if yst is not None:
         return yst
-    # 2) @stockID.csv 最後一筆收盤價 (支援中英文欄位名),若檔案時間屬性不合理就可很快判斷,需要外部工具修護正確資料.建議程式入口先檢查
+    # 2) @stockID.csv 最後一筆收盤價
+    # (支援中英文欄位名),若檔案時間屬性不合理就可很快判斷,需要外部工具修護正確資料.建議程式入口先檢查
     path = f"@{stock_id}.csv"
     if os.path.exists(path):
         try:
@@ -813,26 +878,38 @@ def _get_ref_price(stock_id: str, fallback_open=None):
 
 def _tick_size(price: float) -> float:
     """台股檔位跳動（tick size）。"""
-    if price < 10: return 0.01
-    if price < 50: return 0.05
-    if price < 100: return 0.1
-    if price < 500: return 0.5
-    if price < 1000: return 1.0
+    if price < 10:
+        return 0.01
+    if price < 50:
+        return 0.05
+    if price < 100:
+        return 0.1
+    if price < 500:
+        return 0.5
+    if price < 1000:
+        return 1.0
     return 5.0
+
 
 def _tick_floor(price: float) -> float:
     """截斷到 tick（漲停價用）。"""
-    if price is None: return None
+    if price is None:
+        return None
     import math
+
     tk = _tick_size(price)
     return round(math.floor(price / tk + 1e-9) * tk, 2)
 
+
 def _tick_ceil(price: float) -> float:
     """進位到 tick（跌停價用）。"""
-    if price is None: return None
+    if price is None:
+        return None
     import math
+
     tk = _tick_size(price)
     return round(math.ceil(price / tk - 1e-9) * tk, 2)
+
 
 def _get_limit_prices(stock_id: str):
     """取得漲停價/跌停價（含 tick rounding）。
@@ -862,9 +939,9 @@ def _calc_limit_state(close_price, stock_id):
         return None
     up_price, down_price = _get_limit_prices(stock_id)
     if up_price is not None and close_price >= up_price:
-        return 'up'
+        return "up"
     if down_price is not None and close_price <= down_price:
-        return 'down'
+        return "down"
     return None
 
 
@@ -893,7 +970,13 @@ def _load_financials():
                     "pe": peg_info.get("forward_pe"),
                     "pb": None,
                     "peg": peg_info.get("peg"),
-                    "peg_note": f"法人預估EPS={s.get('consensus_eps','?')} ({s.get('method','?')})"
+                    "peg_note": f"法人預估EPS={
+                        s.get(
+                            'consensus_eps',
+                            '?')} ({
+                        s.get(
+                            'method',
+                            '?')})",
                 }
         except Exception:
             pass
@@ -929,6 +1012,7 @@ def _load_financials():
     _fin_cache_time = now
     return result
 
+
 def _load_fundamentals():
     """Load fundamentals.json once; PE/PB/PEG computed from live price.
     PE = close / eps_ttm ; PB = close / bps ; PEG = (close/forward_eps) / |growth|
@@ -941,6 +1025,7 @@ def _load_fundamentals():
         except Exception:
             pass
     return {}
+
 
 def _compute_pe_pb_peg(close_price, fund):
     """Compute PE/PB/PEG from live close_price + static fundamentals.
@@ -959,15 +1044,16 @@ def _compute_pe_pb_peg(close_price, fund):
     forward_pe = round(close_price / fwd_eps, 2) if fwd_eps and fwd_eps > 0 else None
     trailing_pe = round(close_price / eps, 2) if eps and eps > 0 else None
     pe = forward_pe if forward_pe is not None else trailing_pe
-    pe_source = 'forward' if forward_pe is not None else ('trailing' if trailing_pe is not None else None)
+    pe_source = "forward" if forward_pe is not None else ("trailing" if trailing_pe is not None else None)
 
-    # Revision: compare forward_eps vs eps_ttm (proxy for analyst revision direction)
+    # Revision: compare forward_eps vs eps_ttm (proxy for analyst revision
+    # direction)
     revision = None
     if fwd_eps and eps and eps > 0:
         if fwd_eps > eps:
-            revision = 'up'
+            revision = "up"
         elif fwd_eps < eps:
-            revision = 'down'
+            revision = "down"
 
     pb = round(close_price / bps, 2) if bps and bps > 0 else None
 
@@ -977,16 +1063,18 @@ def _compute_pe_pb_peg(close_price, fund):
 
     if pe and growth and abs(growth) > 0.1 and use_eps:
         peg = round(pe / abs(growth), 2)
-        src = 'forward' if fwd_eps else 'ttm'
-        note = f'{src}EPS={use_eps} | {note}'
+        src = "forward" if fwd_eps else "ttm"
+        note = f"{src}EPS={use_eps} | {note}"
     elif use_eps and use_eps > 0:
-        src = 'forward' if fwd_eps else 'ttm'
-        note = f'{src}EPS={use_eps} | no PEG'
+        src = "forward" if fwd_eps else "ttm"
+        note = f"{src}EPS={use_eps} | no PEG"
 
     return pe, pb, peg, note, pe_source, revision
 
+
 _LAST_KNOWN = {}
 _FUND = _load_fundamentals()
+
 
 def _detect_stock_type(stock_id: str, price=None) -> str:
     """依市值排名分類：大型/中型/小型。
@@ -999,19 +1087,68 @@ def _detect_stock_type(stock_id: str, price=None) -> str:
             return tier
     # 2) 降級：內建 0050 成分股清單
     tw50 = {
-        '2330', '2317', '2454', '2412', '2881', '2882', '2886', '2891',
-        '2308', '2303', '2327', '2344', '2345', '2357', '2379', '2382',
-        '2395', '2408', '3008', '3034', '3045', '3711', '4904', '4938',
-        '5871', '5876', '5880', '6505', '1301', '1303', '1326', '2002',
-        '2207', '2603', '2609', '2610', '2615', '2633', '2801', '2880',
-        '2883', '2884', '2885', '2887', '2888', '2890', '2892', '2912',
-        '3443', '3533', '3661', '5269', '6415', '8046', '8299', '8454',
+        "2330",
+        "2317",
+        "2454",
+        "2412",
+        "2881",
+        "2882",
+        "2886",
+        "2891",
+        "2308",
+        "2303",
+        "2327",
+        "2344",
+        "2345",
+        "2357",
+        "2379",
+        "2382",
+        "2395",
+        "2408",
+        "3008",
+        "3034",
+        "3045",
+        "3711",
+        "4904",
+        "4938",
+        "5871",
+        "5876",
+        "5880",
+        "6505",
+        "1301",
+        "1303",
+        "1326",
+        "2002",
+        "2207",
+        "2603",
+        "2609",
+        "2610",
+        "2615",
+        "2633",
+        "2801",
+        "2880",
+        "2883",
+        "2884",
+        "2885",
+        "2887",
+        "2888",
+        "2890",
+        "2892",
+        "2912",
+        "3443",
+        "3533",
+        "3661",
+        "5269",
+        "6415",
+        "8046",
+        "8299",
+        "8454",
     }
     if stock_id in tw50:
-        return 'large_cap'
-    if len(stock_id) == 4 and stock_id[0] in ('2', '3', '4', '5', '6', '8', '9'):
-        return 'mid_cap'
-    return 'small_cap'
+        return "large_cap"
+    if len(stock_id) == 4 and stock_id[0] in ("2", "3", "4", "5", "6", "8", "9"):
+        return "mid_cap"
+    return "small_cap"
 
 
 def _score_to_label(score):
@@ -1030,8 +1167,8 @@ def _score_to_label(score):
 def _parse_list(val):
     """Parse CSV list string like '[1,2,3]' → [1,2,3]"""
     try:
-        if isinstance(val, str) and val.startswith('['):
-            return [float(x.strip()) for x in val.strip('[]').split(',') if x.strip()]
+        if isinstance(val, str) and val.startswith("["):
+            return [float(x.strip()) for x in val.strip("[]").split(",") if x.strip()]
     except Exception:
         pass
     return []
@@ -1090,14 +1227,16 @@ def _recent_rows_api(stock_id: str, n: int = 5) -> list:
         # 跳過完全無成交量的列（內外盤區間 delta 為 0）
         if vol <= 0 and in_vol <= 0 and out_vol <= 0:
             continue
-        records.append({
-            "time": r.get("timestamp", "")[-8:],
-            "price": price,
-            "vol": vol,
-            "in_vol": in_vol,
-            "out_vol": out_vol,
-            "amt": max(0, amt),
-        })
+        records.append(
+            {
+                "time": r.get("timestamp", "")[-8:],
+                "price": price,
+                "vol": vol,
+                "in_vol": in_vol,
+                "out_vol": out_vol,
+                "amt": max(0, amt),
+            }
+        )
     return records[-n:] if len(records) > n else records  # 不足 n 列就顯示實際有的
 
 
@@ -1115,7 +1254,6 @@ def read_recent_rows(stock_id: str, n: int = 5) -> list:
 
 def _get_actual_day_volume(stock_id: str):
     """盤後從 @stockID.csv 讀取當日實際總量與收盤價，用於覆蓋 5 秒 CSV 的估算值。"""
-    from datetime import datetime
     now = datetime.now()
     if now.hour < 14 or (now.hour == 14 and now.minute < 30):
         return None, None
@@ -1136,8 +1274,10 @@ def _get_actual_day_volume(stock_id: str):
                 low_p = _normalize_price(_num(r, "最低價") or _num(r, "low_price"))
                 day_info = {
                     "vol": vol,
-                    "close": close, "open": open_p,
-                    "high": high_p, "low": low_p,
+                    "close": close,
+                    "open": open_p,
+                    "high": high_p,
+                    "low": low_p,
                 }
                 return vol, day_info
         return None, None
@@ -1146,18 +1286,40 @@ def _get_actual_day_volume(stock_id: str):
 
 
 def _empty_card(stock_id: str) -> dict:
-    return {"stock_id": stock_id, "stock_name": get_stock_name(stock_id),
-            "close_price": None, "open_price": None, "timestamp": "",
-            "high_price": None, "low_price": None, "price_diff": None,
-            "deal_volume": 0, "deal_amount": None, "trade_count": 0,
-            "total_in_volume": 0, "total_out_volume": 0, "estimated_day_volume": 0,
-            "volume_label": "盤前預估量",
-            "pct_of_yesterday_avg": None, "ma5": None, "ma10": None,
-            "stock_type": "unknown", "participation_score": None, "pe_source": None, "pe_revision": None,
-            "participation_label": "等待資料",
-            "buy_prices": [], "buy_volumes": [], "sell_prices": [], "sell_volumes": [],
-            "buy_total_volume": 0, "sell_total_volume": 0, "buy_sell_imbalance": 0,
-            "ref_price": None, "limit_state": None}
+    return {
+        "stock_id": stock_id,
+        "stock_name": get_stock_name(stock_id),
+        "close_price": None,
+        "open_price": None,
+        "timestamp": "",
+        "high_price": None,
+        "low_price": None,
+        "price_diff": None,
+        "deal_volume": 0,
+        "deal_amount": None,
+        "trade_count": 0,
+        "total_in_volume": 0,
+        "total_out_volume": 0,
+        "estimated_day_volume": 0,
+        "volume_label": "盤前預估量",
+        "pct_of_yesterday_avg": None,
+        "ma5": None,
+        "ma10": None,
+        "stock_type": "unknown",
+        "participation_score": None,
+        "pe_source": None,
+        "pe_revision": None,
+        "participation_label": "等待資料",
+        "buy_prices": [],
+        "buy_volumes": [],
+        "sell_prices": [],
+        "sell_volumes": [],
+        "buy_total_volume": 0,
+        "sell_total_volume": 0,
+        "buy_sell_imbalance": 0,
+        "ref_price": None,
+        "limit_state": None,
+    }
 
 
 @app.route("/")
@@ -1184,6 +1346,27 @@ def api_stocks():
     for sid in get_active_stocks():
         rec = read_latest_csv(sid)
         result[sid] = rec if rec else _empty_card(sid)
+    # Merge financial ratios (PE, PB, PEG, etc.) from cached financial data
+    # `_load_financials` returns a dict keyed by stock code with fields:
+    #   pe, pb, peg, peg_note (and potentially pe_source, pe_revision)
+    # Update each stock record in-place so the front‑end cards can display
+    # them.
+    fin_data = _load_financials()
+    for sid, rec in result.items():
+        # Ensure rec is a mutable dict; _empty_card returns a dict as well.
+        if isinstance(rec, dict):
+            fd = fin_data.get(sid, {})
+            if fd:
+                rec.update(
+                    {
+                        "pe": fd.get("pe"),
+                        "pb": fd.get("pb"),
+                        "peg": fd.get("peg"),
+                        "pe_source": fd.get("pe_source"),
+                        "pe_revision": fd.get("pe_revision"),
+                        "peg_note": fd.get("peg_note"),
+                    }
+                )
     return jsonify(result)
 
 
@@ -1199,14 +1382,16 @@ def api_records():
             amt = _num(r, "deal_amount") or 0
             if amt > 0 and vol > 0 and amt / vol > 20000:
                 amt = round(amt / 10000, 0)
-            records.append({
-                "time": r.get("timestamp", "")[-8:],
-                "price": price,
-                "vol": vol,
-                "in_vol": max(0, _num(r, "total_in_volume", int) or 0),
-                "out_vol": max(0, _num(r, "total_out_volume", int) or 0),
-                "amt": max(0, amt),
-            })
+            records.append(
+                {
+                    "time": r.get("timestamp", "")[-8:],
+                    "price": price,
+                    "vol": vol,
+                    "in_vol": max(0, _num(r, "total_in_volume", int) or 0),
+                    "out_vol": max(0, _num(r, "total_out_volume", int) or 0),
+                    "amt": max(0, amt),
+                }
+            )
         result[sid] = records
     return jsonify(result)
 
@@ -1215,12 +1400,14 @@ def api_records():
 def api_watchlists():
     wl = load_watchlists()
     meta = load_watchlist_meta()
-    return jsonify({
-        "watchlists": list(wl.keys()),
-        "active": _active_watchlist,
-        "meta": meta,
-        "content": wl,
-    })
+    return jsonify(
+        {
+            "watchlists": list(wl.keys()),
+            "active": _active_watchlist,
+            "meta": meta,
+            "content": wl,
+        }
+    )
 
 
 @app.route("/api/watchlist/<name>", methods=["POST"])
@@ -1231,7 +1418,6 @@ def api_switch_watchlist(name):
         _active_watchlist = name
         return jsonify({"ok": True, "active": name, "stocks": wl[name].get("stocks", [])})
     return jsonify({"ok": False, "error": f"自選股 '{name}' 不存在"}), 404
-
 
 
 @app.route("/api/watchlist/add", methods=["POST"])
@@ -1335,20 +1521,26 @@ def api_stock_search():
 
 def _fetch_new_stock_data(stock_id: str):
     """為新加入的自選股取得昨日收盤資料、參考價，並在 fundamentals.json 建立佔位。"""
-    import subprocess, sys
+    import subprocess
+    import sys
+
     # 1. fundamentals.json 補佔位（避免 PE/PB/PEG 永遠 --）
     _ensure_fund_placeholder(stock_id)
     try:
         result = subprocess.run(
             [sys.executable, "fetch_daily_close.py", "--stocks", stock_id, "--compare-only"],
-            capture_output=True, text=True, timeout=60,
-            cwd=os.path.dirname(os.path.abspath(__file__))
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
         )
         if "無異常" not in result.stdout:
             subprocess.run(
                 [sys.executable, "fetch_daily_close.py", "--stocks", stock_id],
-                capture_output=True, text=True, timeout=60,
-                cwd=os.path.dirname(os.path.abspath(__file__))
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
             )
     except Exception:
         pass
@@ -1360,6 +1552,7 @@ def _ensure_fund_placeholder(stock_id: str):
     fund_path = "fundamentals.json"
     try:
         import json as _json
+
         if os.path.exists(fund_path):
             with open(fund_path, "r", encoding="utf-8") as f:
                 data = _json.load(f)
@@ -1368,8 +1561,11 @@ def _ensure_fund_placeholder(stock_id: str):
         if stock_id not in data.get("stocks", {}):
             data.setdefault("stocks", {})[stock_id] = {
                 "name": get_stock_name(stock_id),
-                "eps_ttm": None, "bps": None, "eps_growth_pct": None,
-                "forward_eps": None, "note": "new_stock_placeholder"
+                "eps_ttm": None,
+                "bps": None,
+                "eps_growth_pct": None,
+                "forward_eps": None,
+                "note": "new_stock_placeholder",
             }
             with open(fund_path, "w", encoding="utf-8") as f:
                 _json.dump(data, f, ensure_ascii=False, indent=2)
@@ -1405,10 +1601,12 @@ def api_lookup():
         if match:
             return jsonify({"query": q, "result": match, "type": "name_to_symbol"})
         if q.isdigit() and len(q) == 4:
-            return jsonify({"query": q, "result": None, "type": "symbol_to_name",
-                            "hint": f"'{q}' 不在 stock_names.json 中"})
-        return jsonify({"query": q, "result": None, "type": "unknown",
-                        "hint": f"找不到 '{q}'，請確認股票代號或公司名稱"})
+            return jsonify(
+                {"query": q, "result": None, "type": "symbol_to_name", "hint": f"'{q}' 不在 stock_names.json 中"}
+            )
+        return jsonify(
+            {"query": q, "result": None, "type": "unknown", "hint": f"找不到 '{q}'，請確認股票代號或公司名稱"}
+        )
     return jsonify({"error": "請提供 symbol= 或 name= 或 q= 查詢參數"}), 400
 
 
@@ -1439,17 +1637,21 @@ def api_options():
         put_oi=float(request.args.get("poi", 0)) or None,
     )
 
-    return jsonify({
-        "S": S, "K": K, "days": days,
-        "fair_call": result.fair_call,
-        "fair_put": result.fair_put,
-        "call_premium_pct": result.call_premium_pct,
-        "put_premium_pct": result.put_premium_pct,
-        "call_iv": result.call_iv,
-        "put_iv": result.put_iv,
-        "parity_diff": result.parity_diff,
-        "pcr": pcr,
-    })
+    return jsonify(
+        {
+            "S": S,
+            "K": K,
+            "days": days,
+            "fair_call": result.fair_call,
+            "fair_put": result.fair_put,
+            "call_premium_pct": result.call_premium_pct,
+            "put_premium_pct": result.put_premium_pct,
+            "call_iv": result.call_iv,
+            "put_iv": result.put_iv,
+            "parity_diff": result.parity_diff,
+            "pcr": pcr,
+        }
+    )
 
 
 def main():

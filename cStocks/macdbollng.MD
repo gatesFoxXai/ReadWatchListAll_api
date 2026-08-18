@@ -20,7 +20,7 @@ python3 macdbollng.py
 執行後會顯示圖表視窗。
 
 ## 功能
-- 預設default_12_26_9 繪製csv檔的標準算法計算macd, 可用key chosen_key = "default_12_26_9"選擇要用的組合 
+- 預設default_12_26_9 繪製csv檔的標準算法計算macd, 可用key chosen_key = "default_12_26_9"選擇要用的組合
 - 上方繪製csv檔依指定顏色的布林帶參數畫出折現圖
 - 下方繪製csv檔依指定顏色的macd柱狀圖高度,MACD線（DIF，快線）
 - 為x 軸日期美化,每隨標註一次
@@ -33,7 +33,7 @@ python3 macdbollng.py
 ```python
 共用 x 軸，時間同步
 上圖：收盤價 + 布林帶 + 布林帶寬(次軸)
-下圖：MACD 
+下圖：MACD
 ```
 
 ## 調整樣式
@@ -54,7 +54,7 @@ macd_param_sets = {
 # 可選擇要用的組合 key
 chosen_key = "default_12_26_9"
 #根據要計算查詢的資料來源
-csv_file = "2317.csv" 
+csv_file = "2317.csv"
 
 #修改bug
 1.為了便於bug修改及後續整合,請N_DAYS = 60 # X 軸刻度間隔：每交易日的 N 天,取代
@@ -67,11 +67,11 @@ Please integrate and encapsulate MACDBolling and KDJ, and add another KDJ indica
 Overbought conditions warrant caution against pullbacks; oversold conditions present opportunities for rebounds.
 KDJ Parameter Setting and Adjustment Suggestions
 
-System Default 9,3,3 
+System Default 9,3,3
 Suitable for most markets, with frequent fluctuations and many false signals.
 Sensitive 5,3,3
 Suitable for short-term trading; the indicator is faster, but there are more false signals, requiring the use of other indicators.
-Conservative 8,5,3 Or 
+Conservative 8,5,3 Or
 18,3,3 reduces noise and provides more stable signals, suitable for medium- to short-term traders.
 
 5.Encapsulate into a class

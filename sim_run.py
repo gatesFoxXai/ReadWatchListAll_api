@@ -4,6 +4,7 @@ Usage: python sim_run.py [--port 5000] [--interval 5]
   API 優先: 若偵測到 .api_active（UAT 已送來信號），則不啟動。
   啟動前檢查 .dashboard_pid，防止重複啟動。
 """
+
 import argparse
 import os
 import sys
@@ -13,7 +14,10 @@ import web_dashboard
 from YuantaAPI_Pythonnet import SubscribeWatclistAll_Out
 import time
 
-# Helper thread to invoke the mock SubscribeWatclistAll_Out after a short delay.
+# Helper thread to invoke the mock SubscribeWatclistAll_Out after a short
+# delay.
+
+
 def _mock_subscribe_call():
     """Wait for the API login flag (.api_active) and then invoke the mock
     SubscribeWatclistAll_Out. In simulation mode the API process is not started,
@@ -40,6 +44,7 @@ def _mock_subscribe_call():
         print("[SIM] Mock SubscribeWatclistAll_Out error:", e)
     print("[SIM] Finished mock SubscribeWatclistAll_Out call (thread)")
 
+
 API_FLAG = ".api_active"
 PID_FILE = ".dashboard_pid"
 
@@ -51,10 +56,10 @@ def _check_duplicate():
             with open(PID_FILE, encoding="utf-8") as f:
                 old_pid = int(f.read().strip())
             import ctypes.wintypes
+
             SYNCHRONIZE = 0x100000
             PROCESS_QUERY_INFORMATION = 0x0400
-            handle = ctypes.windll.kernel32.OpenProcess(
-                SYNCHRONIZE | PROCESS_QUERY_INFORMATION, False, old_pid)
+            handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, False, old_pid)
             if handle:
                 ctypes.windll.kernel32.CloseHandle(handle)
                 return old_pid
@@ -87,10 +92,10 @@ def _check_api_active():
         with open(API_FLAG, encoding="utf-8") as f:
             pid = int(f.read().strip())
         import ctypes.wintypes
+
         SYNCHRONIZE = 0x100000
         PROCESS_QUERY_INFORMATION = 0x0400
-        handle = ctypes.windll.kernel32.OpenProcess(
-            SYNCHRONIZE | PROCESS_QUERY_INFORMATION, False, pid)
+        handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, False, pid)
         if handle:
             ctypes.windll.kernel32.CloseHandle(handle)
             return True
@@ -132,8 +137,7 @@ def main():
         poll_thread = threading.Thread(target=web_dashboard.poll_worker, daemon=True)
         poll_thread.start()
         print(f"Dashboard -> http://localhost:{args.port}")
-        web_dashboard.app.run(host="0.0.0.0", port=args.port,
-                              debug=False, threaded=True)
+        web_dashboard.app.run(host="0.0.0.0", port=args.port, debug=False, threaded=True)
     finally:
         _cleanup_pid()
 

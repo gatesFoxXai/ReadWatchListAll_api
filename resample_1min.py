@@ -13,12 +13,11 @@
 
 輸出: {output_dir}/{stock_id}_1min.csv
 """
+
 import argparse
-import csv
 import json
 import os
-import sys
-from datetime import datetime, date, timedelta
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -101,8 +100,7 @@ def resample_5sec_to_1min(stock_id, date_str=None, days=1, output_dir=None):
     df = df[~((df["datetime"].dt.hour == 13) & (df["datetime"].dt.minute > 30))]
 
     # 數值轉換
-    for col in ["open_price", "high_price", "low_price", "close_price",
-                "deal_volume", "deal_amount", "trade_count"]:
+    for col in ["open_price", "high_price", "low_price", "close_price", "deal_volume", "deal_amount", "trade_count"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     # 過濾無效資料（OHLC 全為 0 的 row）
@@ -134,16 +132,18 @@ def resample_5sec_to_1min(stock_id, date_str=None, days=1, output_dir=None):
 
     # 整理輸出欄位
     df_1min = df_1min.reset_index()
-    df_1min = df_1min.rename(columns={
-        "datetime": "日期",
-        "open_price": "開盤價",
-        "high_price": "最高價",
-        "low_price": "最低價",
-        "close_price": "收盤價",
-        "deal_volume": "成交股數",
-        "deal_amount": "成交金額",
-        "trade_count": "成交筆數",
-    })
+    df_1min = df_1min.rename(
+        columns={
+            "datetime": "日期",
+            "open_price": "開盤價",
+            "high_price": "最高價",
+            "low_price": "最低價",
+            "close_price": "收盤價",
+            "deal_volume": "成交股數",
+            "deal_amount": "成交金額",
+            "trade_count": "成交筆數",
+        }
+    )
     df_1min["日期"] = df_1min["日期"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
     # 確保所有欄位為整數（股數/金額/筆數）
@@ -167,16 +167,11 @@ def resample_5sec_to_1min(stock_id, date_str=None, days=1, output_dir=None):
 
 def main():
     parser = argparse.ArgumentParser(description="5 秒 CSV → 1 分 K 轉換工具")
-    parser.add_argument("stock", nargs="?", default=None,
-                        help="股票代碼（省略時用 --all）")
-    parser.add_argument("--all", action="store_true",
-                        help="轉換全部自選股")
-    parser.add_argument("--date", default=None,
-                        help="指定日期 YYYYMMDD")
-    parser.add_argument("--days", type=int, default=1,
-                        help="最近 N 個交易日（預設 1，--date 指定時忽略）")
-    parser.add_argument("--output-dir", default=None,
-                        help="輸出目錄（預設 1min/）")
+    parser.add_argument("stock", nargs="?", default=None, help="股票代碼（省略時用 --all）")
+    parser.add_argument("--all", action="store_true", help="轉換全部自選股")
+    parser.add_argument("--date", default=None, help="指定日期 YYYYMMDD")
+    parser.add_argument("--days", type=int, default=1, help="最近 N 個交易日（預設 1，--date 指定時忽略）")
+    parser.add_argument("--output-dir", default=None, help="輸出目錄（預設 1min/）")
     args = parser.parse_args()
 
     if args.all or not args.stock:
@@ -184,8 +179,7 @@ def main():
     else:
         stocks = [args.stock]
 
-    print(f"1 分 K 轉換: {len(stocks)} 檔, "
-          f"日期={'指定' if args.date else f'最近 {args.days} 天'}")
+    print(f"1 分 K 轉換: {len(stocks)} 檔, " f"日期={'指定' if args.date else f'最近 {args.days} 天'}")
     print()
 
     ok = 0

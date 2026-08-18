@@ -1,6 +1,7 @@
 """Put/Call 合理價計算 — Black-Scholes + Put/Call Ratio 溢價避險
 Usage: from option_pricing import OptionPricing, put_call_ratio_analysis
 """
+
 import math
 from dataclasses import dataclass
 
@@ -36,8 +37,7 @@ class OptionPricing:
         d2 = d1 - sigma * math.sqrt(T)
         return d1, d2
 
-    def black_scholes(self, S: float, K: float, T: float, sigma: float,
-                      is_call: bool = True) -> float:
+    def black_scholes(self, S: float, K: float, T: float, sigma: float, is_call: bool = True) -> float:
         """Black-Scholes 理論價。"""
         d1, d2 = self._d1_d2(S, K, T, sigma)
         df = math.exp(-self.rate * T)
@@ -45,8 +45,16 @@ class OptionPricing:
             return S * _norm_cdf(d1) - K * df * _norm_cdf(d2)
         return K * df * _norm_cdf(-d2) - S * _norm_cdf(-d1)
 
-    def implied_vol(self, market_price: float, S: float, K: float, T: float,
-                    is_call: bool = True, tol: float = 1e-6, max_iter: int = 100) -> float:
+    def implied_vol(
+        self,
+        market_price: float,
+        S: float,
+        K: float,
+        T: float,
+        is_call: bool = True,
+        tol: float = 1e-6,
+        max_iter: int = 100,
+    ) -> float:
         """Newton-Raphson 反推隱含波動率。"""
         if market_price <= 0 or S <= 0 or K <= 0 or T <= 0:
             return 0
@@ -67,17 +75,16 @@ class OptionPricing:
         d1, _ = self._d1_d2(S, K, T, sigma)
         return S * math.sqrt(T) * _norm_pdf(d1) if T > 0 and sigma > 0 else 0
 
-    def put_call_parity(self, S: float, K: float, T: float,
-                        call_market: float, put_market: float) -> float:
+    def put_call_parity(self, S: float, K: float, T: float, call_market: float, put_market: float) -> float:
         """Put-Call Parity 偏差: C - P vs S - K*e^(-rT)。正=Call偏貴, 負=Put偏貴。"""
         df = math.exp(-self.rate * T)
         theoretical = S - K * df
         market_diff = call_market - put_market
         return market_diff - theoretical
 
-    def evaluate(self, S: float, K: float, days_to_expiry: int,
-                 call_market: float, put_market: float,
-                 vol_estimate: float = 0.25) -> OptionResult:
+    def evaluate(
+        self, S: float, K: float, days_to_expiry: int, call_market: float, put_market: float, vol_estimate: float = 0.25
+    ) -> OptionResult:
         """完整評估: 理論價 + IV + 溢價% + Parity 偏差。"""
         T = max(days_to_expiry, 1) / self.days_per_year
         fair_call = self.black_scholes(S, K, T, vol_estimate, is_call=True)
@@ -103,8 +110,7 @@ def _norm_pdf(x: float) -> float:
     return math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
 
 
-def put_call_ratio_analysis(call_vol: float, put_vol: float,
-                            call_oi: float = None, put_oi: float = None) -> dict:
+def put_call_ratio_analysis(call_vol: float, put_vol: float, call_oi: float = None, put_oi: float = None) -> dict:
     """Put/Call 成交量/未平倉比率分析。
     PCR > 1.2 → 偏空避險需求高; PCR < 0.7 → 偏多。
     """

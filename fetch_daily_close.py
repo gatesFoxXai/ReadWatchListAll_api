@@ -13,7 +13,6 @@ import csv
 import json
 import os
 import ssl
-import sys
 import time
 from datetime import datetime
 from urllib.request import urlopen, Request
@@ -46,11 +45,13 @@ def load_watchlist_stocks():
 
 # ---- TWSE 上市 (OpenAPI) ----
 
+
 def _detect_twse_data_date(ref_code="2330"):
     """比對 OpenAPI 與 STOCK_DAY 網站 API，偵測 OpenAPI 回傳的實際日期。
     STOCK_DAY_ALL 不回傳日期欄位，且可能回傳前一交易日資料（if當日尚未發布） return null。
     回傳格式: 回傳正常return 'YYYYMMDD'，失敗回傳 None。"""
-    url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={datetime.now().strftime('%Y%m%d')}&stockNo={ref_code}"
+    url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={
+        datetime.now().strftime('%Y%m%d')}&stockNo={ref_code}"
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -129,6 +130,7 @@ def fetch_twse_daily():
 
 # ---- TPEx 上櫃 (OpenAPI) ----
 
+
 def _detect_tpex_data_date():
     """從 TPEx API 表格標題偵測實際資料日期。
     TPEx API 可能回傳前一日資料（當日尚未發布），需從回應中提取日期。
@@ -138,7 +140,7 @@ def _detect_tpex_data_date():
     for days_back in [0, 1, 2]:
         d = now.replace(day=now.day - days_back) if days_back > 0 else now
         roc_date = f"{d.year - 1911}/{d.month:02d}/{d.day:02d}"
-        #115/07/10
+        # 115/07/10
         url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?d={roc_date}&response=json"
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
@@ -151,7 +153,12 @@ def _detect_tpex_data_date():
             continue
         if data.get("stat") == "ok" and data.get("tables"):
             # 有資料表示此日期已發布
-            print(f"_detect_tpex_data_date days_back:{days_back} roc_date:{roc_date} now:{now} 日期已發布:{d.year}{d.month:02d}{d.day:02d}")
+            print(
+                f"_detect_tpex_data_date days_back:{days_back} roc_date:{roc_date} now:{now} 日期已發布:{
+                    d.year}{
+                    d.month:02d}{
+                    d.day:02d}"
+            )
             return f"{d.year}{d.month:02d}{d.day:02d}"
     return None
 
@@ -227,6 +234,7 @@ def fetch_tpex_daily():
 
 # ---- 收盤比對 ----
 
+
 def compare_and_report(stock_id, date_str, official, threshold=0.005):
     """比對 @stockID.csv 既有數據與官方數據，回傳誤差清單。
     門檻 threshold 預設 0.5%（0.005）。
@@ -269,13 +277,9 @@ def compare_and_report(stock_id, date_str, official, threshold=0.005):
             continue
         pct = abs(csv_val - off_val) / abs(off_val)
         if pct > threshold:
-            diffs.append({
-                "field": label,
-                "csv": csv_val,
-                "official": off_val,
-                "pct": round(pct * 100, 2),
-                "flag": "超過0.5%"
-            })
+            diffs.append(
+                {"field": label, "csv": csv_val, "official": off_val, "pct": round(pct * 100, 2), "flag": "超過0.5%"}
+            )
 
     # 檢查是否 OHLC 全部相同（資料未更新）
     ohlc_fields = ["開盤價", "最高價", "最低價", "收盤價"]
@@ -283,22 +287,24 @@ def compare_and_report(stock_id, date_str, official, threshold=0.005):
         # 即使沒超過門檻，也檢查 OHLC 一致性
         vals = [_num(csv_row.get(f, 0)) for f in ohlc_fields]
         if len(set(vals)) == 1 and vals[0] > 0:
-            diffs.append({
-                "field": "OHLC",
-                "csv": vals[0],
-                "official": official.get("close", 0),
-                "pct": round(abs(vals[0] - official.get("close", 0)) / official.get("close", 0) * 100, 2),
-                "flag": "OHLC全部相同(可能五檔推斷)"
-            })
+            diffs.append(
+                {
+                    "field": "OHLC",
+                    "csv": vals[0],
+                    "official": official.get("close", 0),
+                    "pct": round(abs(vals[0] - official.get("close", 0)) / official.get("close", 0) * 100, 2),
+                    "flag": "OHLC全部相同(可能五檔推斷)",
+                }
+            )
 
     return diffs
 
 
 def print_comparison(stocks, date_str, all_data):
     """列印比對報表"""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  收盤比對報告 ({date_str})  —  門檻 0.5%")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     total_issues = 0
     ok_count = 0
 
@@ -316,26 +322,44 @@ def print_comparison(stocks, date_str, all_data):
             if d["field"] == "-":
                 print(f"  {flag}")
             else:
-                print(f"  {d['field']}: CSV={d['csv']}  官方={d['official']}  誤差={d['pct']}%  [{flag}]")
+                print(
+                    f"  {
+                        d['field']}: CSV={
+                        d['csv']}  官方={
+                        d['official']}  誤差={
+                        d['pct']}%  [{flag}]"
+                )
             total_issues += 1
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  比對完成: {ok_count}/{len([s for s in stocks if s in all_data])} 無異常")
     if total_issues > 0:
         print(f"  發現 {total_issues} 項誤差超過 0.5%，請檢查上方明細")
-    print(f"{'='*70}\n")
+    print(f"{'=' * 70}\n")
     return total_issues
 
 
 # ---- 寫入 ----
 
+
 def write_daily_summary(stock_id, date_str, info):
     """寫入 @stockID.csv（去重）。若同日已有記錄則更新 OHLCV，
     保留既有 total_in_volume/total_out_volume 不被覆蓋為 0。"""
     path = f"@{stock_id}.csv"
-    fieldnames = ["日期", "stock_id", "開盤價", "最高價", "最低價",
-                  "收盤價", "成交股數", "成交金額", "成交筆數",
-                  "total_in_volume", "total_out_volume", "estimated_day_volume"]
+    fieldnames = [
+        "日期",
+        "stock_id",
+        "開盤價",
+        "最高價",
+        "最低價",
+        "收盤價",
+        "成交股數",
+        "成交金額",
+        "成交筆數",
+        "total_in_volume",
+        "total_out_volume",
+        "estimated_day_volume",
+    ]
 
     existing_rows = []
     date_found = False
@@ -347,16 +371,22 @@ def write_daily_summary(stock_id, date_str, info):
                     if d == date_str:
                         date_found = True
                         # 保留既有的 total_in/total_out
-                        existing_rows.append({
-                            "日期": date_str, "stock_id": stock_id,
-                            "開盤價": info["open"], "最高價": info["high"],
-                            "最低價": info["low"], "收盤價": info["close"],
-                            "成交股數": info["vol"], "成交金額": info["amount"],
-                            "成交筆數": info["trades"],
-                            "total_in_volume": r.get("total_in_volume", 0) or 0,
-                            "total_out_volume": r.get("total_out_volume", 0) or 0,
-                            "estimated_day_volume": info["vol"],
-                        })
+                        existing_rows.append(
+                            {
+                                "日期": date_str,
+                                "stock_id": stock_id,
+                                "開盤價": info["open"],
+                                "最高價": info["high"],
+                                "最低價": info["low"],
+                                "收盤價": info["close"],
+                                "成交股數": info["vol"],
+                                "成交金額": info["amount"],
+                                "成交筆數": info["trades"],
+                                "total_in_volume": r.get("total_in_volume", 0) or 0,
+                                "total_out_volume": r.get("total_out_volume", 0) or 0,
+                                "estimated_day_volume": info["vol"],
+                            }
+                        )
                     else:
                         existing_rows.append(r)
         except Exception:
@@ -377,15 +407,22 @@ def write_daily_summary(stock_id, date_str, info):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         if not file_exists:
             writer.writeheader()
-        writer.writerow({
-            "日期": date_str, "stock_id": stock_id,
-            "開盤價": info["open"], "最高價": info["high"],
-            "最低價": info["low"], "收盤價": info["close"],
-            "成交股數": info["vol"], "成交金額": info["amount"],
-            "成交筆數": info["trades"],
-            "total_in_volume": 0, "total_out_volume": 0,
-            "estimated_day_volume": info["vol"],
-        })
+        writer.writerow(
+            {
+                "日期": date_str,
+                "stock_id": stock_id,
+                "開盤價": info["open"],
+                "最高價": info["high"],
+                "最低價": info["low"],
+                "收盤價": info["close"],
+                "成交股數": info["vol"],
+                "成交金額": info["amount"],
+                "成交筆數": info["trades"],
+                "total_in_volume": 0,
+                "total_out_volume": 0,
+                "estimated_day_volume": info["vol"],
+            }
+        )
     print(f"  @{stock_id}.csv: {date_str} vol={info['vol']:,}")
 
 
@@ -399,14 +436,47 @@ def update_stock_ref(results):
         except Exception:
             pass
 
+    # Import StockQuoteState for tier detection
+    from YuantaAPI_Pythonnet import StockQuoteState
+
+    # Define tier ranking for change_type logic
+    tier_rank = {
+        "large_cap": 4,
+        "mid_cap": 3,
+        "small_cap": 2,
+        "speculative": 1,
+    }
+
     for code, info in results.items():
         close = info["close"]
+        # Ensure entry exists
         ref[code] = ref.get(code, {})
+        # 昨收價、昨量、漲跌停價
         ref[code]["yst_price"] = int(close * 10000)
         ref[code]["yst_vol"] = info["vol"]
-        # 同時寫入漲跌停價（±10%，raw 格式 ×10000）
         ref[code]["up_price"] = int(round(close * 1.10, 2) * 10000)
         ref[code]["down_price"] = int(round(close * 0.90, 2) * 10000)
+
+        # 取得前一日 tier（若無則為 None）
+        old_tier = ref[code].get("tier")
+        # 依當前收盤價與成交量偵測本日 tier
+        new_tier = StockQuoteState.detect_stock_type(code, price=close, avg_volume=info["vol"])
+        ref[code]["tier"] = new_tier
+
+        # Determine change_type based on tier transition
+        if not old_tier:
+            change_type = "new"
+        else:
+            old_rank = tier_rank.get(old_tier, 0)
+            new_rank = tier_rank.get(new_tier, 0)
+            if new_rank < old_rank:
+                change_type = "downgrade"
+            elif old_rank <= 2 and new_rank == 4:
+                # 從中小或投機升為大型
+                change_type = "exit_mid"
+            else:
+                change_type = ""
+        ref[code]["change_type"] = change_type
 
     with open("stock_ref.json", "w", encoding="utf-8") as f:
         json.dump(ref, f, ensure_ascii=False, indent=2)
@@ -422,13 +492,24 @@ def update_yesterday(stock_id, date_str, info):
     with open(ypath, "w", encoding="utf-8") as f:
         f.write("日期,成交股數,成交金額,開盤價,最高價,最低價,收盤價,漲跌價差,成交筆數\n")
         price_diff = round(info["close"] - info["open"], 2)
-        f.write(f"{date_formatted},{info['vol']},{info['amount']},{info['open']},{info['high']},{info['low']},{info['close']},{price_diff},{info['trades']}\n")
+        f.write(
+            f"{date_formatted},{
+                info['vol']},{
+                info['amount']},{
+                info['open']},{
+                    info['high']},{
+                        info['low']},{
+                            info['close']},{price_diff},{
+                                info['trades']}\n"
+        )
 
 
 # ---- 主流程 ----
 
+
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="從公開資訊站取得收盤數據，寫入 @stockID.csv")
     parser.add_argument("--stocks", default=None, help="股票代碼逗號分隔 (預設: watchlist.json)")
     parser.add_argument("--no-tpex", action="store_true", help="跳過 TPEx")
@@ -436,13 +517,13 @@ def main():
     parser.add_argument("--date", default=None, help="指定日期 YYYYMMDD (預設: 自動偵測)")
     args = parser.parse_args()
 
-    stocks = args.stocks.split(",") if args.stocks else load_watchlist_stocks()   
+    stocks = args.stocks.split(",") if args.stocks else load_watchlist_stocks()
     print(f"[DEBUG] 目標股票: count: {len(stocks)}")
     print(f"[DEBUG] 目標股票: raw: {stocks}")
 
     twse_data, twse_date = fetch_twse_daily()
     time.sleep(1)
-    tpex_data, tpex_date = ({} if args.no_tpex else fetch_tpex_daily())
+    tpex_data, tpex_date = {} if args.no_tpex else fetch_tpex_daily()
 
     # 決定寫入日期：優先使用 --date，否則使用 API 偵測到的日期
     if args.date:
@@ -508,4 +589,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-   

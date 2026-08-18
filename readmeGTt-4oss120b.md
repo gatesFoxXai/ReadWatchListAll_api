@@ -31,7 +31,7 @@ pip install requests pandas matplotlib
 todo:配置參數,計畫整合修改流程
 jsonCsvUpdate.py，
 
-&#x20;├─── 第一步先整合 1.YuantaAPI\_Pythonnet.py,  2.jsonCsvUpdate.py 與 3. SocketStats.py 
+&#x20;├─── 第一步先整合 1.YuantaAPI\_Pythonnet.py,  2.jsonCsvUpdate.py 與 3. SocketStats.py
 
 &#x20;├─── 建議移除YuantaAPI\_Pythonnet.py 的 DEFAULT\_STOCK\_STRUCTURE and def \_save\_stock\_ref\_json():(1.的上方 3416行) 將被jsonCsvUpdate.py 取代
 
@@ -68,7 +68,7 @@ python 1.YuantaAPI\_Pythonnet.py,  2.jsonCsvUpdate.py 與 3. SocketStats.py 須�
 "decimal": 4,
 "credit\_pct": 0,
 "bond\_pct": 0
-...... 
+......
 },
 // 其他股票信息...
 }
@@ -139,4 +139,3 @@ git commit -m "新增數據可視化功能: 支持生成交互式K線圖"
 5. 注意事項
 請勿直接向 main 分支推送更改。
 請在 PR 中提及相關的 Issues（例如 #123）以便追溯。
-

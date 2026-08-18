@@ -1,6 +1,7 @@
 import json
 import os
 
+
 def update_market_no(json_path: str):
     """根據 `TotalDealAmt`（成交金額）對股票進行市值排行，
     並將 `market_no` 欄位更新為排名（1 為最大市值）。
@@ -16,6 +17,7 @@ def update_market_no(json_path: str):
     def deal_amt(item):
         info = item[1]
         return float(info.get("TotalDealAmt", 0))
+
     stocks.sort(key=deal_amt, reverse=True)
 
     # 更新 market_no 為排名
@@ -27,6 +29,7 @@ def update_market_no(json_path: str):
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
     print(f"已依 TotalDealAmt 更新 market_no，總共 {len(stocks)} 支股票。")
+
 
 if __name__ == "__main__":
     cwd = os.path.abspath(os.path.dirname(__file__))

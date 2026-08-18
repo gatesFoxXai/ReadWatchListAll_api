@@ -9,11 +9,11 @@ Usage: 直接存取 http://localhost:5000/hedge
   4. 個股期貨避險 (依自選股對應)
   5. 大戶動向 (前5/前10大交易人未平倉淨部位)
 """
+
 import csv
 import json
 import os
 import ssl
-import time
 from datetime import datetime, timedelta
 from urllib.request import urlopen, Request
 
@@ -28,6 +28,7 @@ STOCK_REF_PATH = os.path.join(BASE_DIR, "stock_ref.json")
 
 
 # ---- 工具函數 ----
+
 
 def _np(val):
     """正規化價格：>100000 → /10000"""
@@ -88,10 +89,10 @@ def get_watchlist_futures():
 # 此處使用簡化版：以 2330 台積電價格 × 權重係數 估算現貨指數水位
 # 正式版需訂閱加權指數代碼 (MarketNo=1, Code="Y" 或類似)
 _INDEX_PROXY = {
-    "2330": 0.30,   # 台積電佔 ~30%
-    "2317": 0.04,   # 鴻海 ~4%
-    "2454": 0.04,   # 聯發科 ~4%
-    "2412": 0.02,   # 中華電 ~2%
+    "2330": 0.30,  # 台積電佔 ~30%
+    "2317": 0.04,  # 鴻海 ~4%
+    "2454": 0.04,  # 聯發科 ~4%
+    "2412": 0.02,  # 中華電 ~2%
 }
 
 
@@ -112,6 +113,7 @@ def estimate_weighted_index():
 
 
 # ---- 理論期貨價 (Cost of Carry) ----
+
 
 def theoretical_futures_price(spot, days_to_expiry, rate=0.015):
     """持有成本模型：F = S × (1 + r × t/365)。
@@ -140,6 +142,7 @@ def next_expiry_date():
 
 # ---- 歷史基差與動態門檻 ----
 
+
 def compute_basis_stats(futures_code="TXFPM1", minutes=60):
     """從歷史 CSV 計算基差的平均與標準差（用於動態門檻）。"""
     rows = _read_last_csv_rows(futures_code, n=minutes * 12)  # ~12 rows/min
@@ -163,7 +166,7 @@ def compute_basis_stats(futures_code="TXFPM1", minutes=60):
 
     mean_basis = sum(basis_list) / len(basis_list)
     variance = sum((b - mean_basis) ** 2 for b in basis_list) / len(basis_list)
-    std_basis = variance ** 0.5
+    std_basis = variance**0.5
 
     return {
         "mean": round(mean_basis, 2),
@@ -174,6 +177,7 @@ def compute_basis_stats(futures_code="TXFPM1", minutes=60):
 
 
 # ---- 大戶動向 (TAIFEX) ----
+
 
 def fetch_large_trader_position():
     """從期交所取得前5/前10大交易人未沖銷淨部位。
@@ -202,7 +206,7 @@ def fetch_large_trader_position():
         # 嘗試解析 CSV（期交所實際上回傳 CSV）
         lines = html.strip().split("\n")
         for line in lines:
-            parts = line.replace('"', '').split(",")
+            parts = line.replace('"', "").split(",")
             if len(parts) >= 7:
                 product = parts[0].strip()
                 if "臺股期貨" in product or "TXF" in product or "台股" in product:
@@ -222,6 +226,7 @@ def fetch_large_trader_position():
 
 
 # ---- 避險分析核心 ----
+
 
 def analyze_hedge(futures_code="TXFPM1", spot=None):
     """綜合避險分析。"""
@@ -317,22 +322,25 @@ def analyze_stock_futures(stock_codes, futures_codes):
             if abs(dev) > 5:  # 個股期門檻 5 點
                 signal = "sell" if dev > 0 else "buy"
 
-        results.append({
-            "stock_id": code,
-            "stock_name": stock.get("stock_name", code),
-            "stock_price": stock_price,
-            "futures_code": fut_code,
-            "futures_price": fut_price,
-            "basis": basis,
-            "fair_price": fair,
-            "deviation": dev,
-            "signal": signal,
-            "days_to_expiry": days_left,
-        })
+        results.append(
+            {
+                "stock_id": code,
+                "stock_name": stock.get("stock_name", code),
+                "stock_price": stock_price,
+                "futures_code": fut_code,
+                "futures_price": fut_price,
+                "basis": basis,
+                "fair_price": fair,
+                "deviation": dev,
+                "signal": signal,
+                "days_to_expiry": days_left,
+            }
+        )
     return results
 
 
 # ---- API 端點 ----
+
 
 @hedge_bp.route("/")
 def index():

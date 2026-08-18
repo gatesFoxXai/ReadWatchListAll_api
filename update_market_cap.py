@@ -23,20 +23,20 @@
   python update_market_cap.py --dry-run    # 僅顯示不寫入
   python update_market_cap.py --stocks 2330,2317  # 指定股票
 
-排程: 建議每月 1-4 號執行（使用 Claude Code /loop 或 Windows Task Scheduler）
+排程: 建議每周執行（或使用 Claude Code /loop 或 Windows Task Scheduler）
 """
+
 import json
 import os
 import ssl
-import sys
 from datetime import datetime
-import calendar
 from urllib.request import urlopen, Request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(BASE_DIR, "market_cap.json")
 
 # ---- TWSE 市值估算 ----
+
 
 def _ssl_ctx():
     ctx = ssl.create_default_context()
@@ -71,6 +71,7 @@ def fetch_twse_bwibbu():
             continue
     print(f"[BWIBBU] TWSE {len(result)} 檔")
     return result
+
 
 def fetch_twse_forward_eps():
     """取得 TWSE 前瞻 EPS（EPS_F）。
@@ -137,6 +138,7 @@ def fetch_tpex_daily():
     except Exception:
         # 嘗試前一天
         from datetime import timedelta
+
         yesterday = now - timedelta(days=1)
         roc_date = f"{yesterday.year - 1911}/{yesterday.month:02d}/{yesterday.day:02d}"
         url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?d={roc_date}&response=json"
@@ -175,44 +177,44 @@ _KNOWN_SHARES = {
     # 半導體
     "2330": 25930380458,  # 台積電
     "2317": 13862990600,  # 鴻海
-    "2454": 7850000000,   # 聯發科
+    "2454": 7850000000,  # 聯發科
     "2303": 16000000000,  # 聯電
-    "2308": 5500000000,   # 台達電
-    "2327": 5000000000,   # 國巨
+    "2308": 5500000000,  # 台達電
+    "2327": 5000000000,  # 國巨
     # 金融
     "2881": 14000000000,  # 富邦金
     "2882": 15000000000,  # 國泰金
     "2886": 15000000000,  # 兆豐金
     "2891": 13000000000,  # 中信金
-    "2412": 7757446000,   # 中華電
+    "2412": 7757446000,  # 中華電
     # 傳產
-    "1301": 5000000000,   # 台塑
-    "1303": 6000000000,   # 南亞
-    "1326": 5000000000,   # 台化
+    "1301": 5000000000,  # 台塑
+    "1303": 6000000000,  # 南亞
+    "1326": 5000000000,  # 台化
     "2002": 16000000000,  # 中鋼
-    "2603": 7000000000,   # 長榮
-    "2609": 5000000000,   # 陽明
-    "2610": 6000000000,   # 華航
+    "2603": 7000000000,  # 長榮
+    "2609": 5000000000,  # 陽明
+    "2610": 6000000000,  # 華航
     # 光電/其他
-    "2344": 2000000000,   # 華邦電
-    "2356": 8000000000,   # 英業達
-    "2345": 5000000000,   # 智邦
-    "2357": 4000000000,   # 華碩
-    "2379": 3000000000,   # 瑞昱
-    "2382": 3000000000,   # 廣達
-    "2395": 2000000000,   # 研華
-    "2408": 5000000000,   # 南亞科
-    "3008": 2000000000,   # 大立光
-    "3034": 2000000000,   # 聯詠
-    "3045": 3000000000,   # 台灣大
-    "3711": 1500000000,   # 日月光投控
-    "4904": 2000000000,   # 遠傳
-    "4938": 2000000000,   # 和碩
-    "6412": 100000000,    # 群聯 (估計)
+    "2344": 2000000000,  # 華邦電
+    "2356": 8000000000,  # 英業達
+    "2345": 5000000000,  # 智邦
+    "2357": 4000000000,  # 華碩
+    "2379": 3000000000,  # 瑞昱
+    "2382": 3000000000,  # 廣達
+    "2395": 2000000000,  # 研華
+    "2408": 5000000000,  # 南亞科
+    "3008": 2000000000,  # 大立光
+    "3034": 2000000000,  # 聯詠
+    "3045": 3000000000,  # 台灣大
+    "3711": 1500000000,  # 日月光投控
+    "4904": 2000000000,  # 遠傳
+    "4938": 2000000000,  # 和碩
+    "6412": 100000000,  # 群聯 (估計)
     # 興櫃/OTC 主要
-    "6122": 50000000,     # 元炬
-    "6123": 60000000,     # 旭軟
-    "8936": 150000000,    # 國統
+    "6122": 50000000,  # 元炬
+    "6123": 60000000,  # 旭軟
+    "8936": 150000000,  # 國統
 }
 DEFAULT_SHARES = 50000000  # 預設 5 千萬股
 
@@ -222,6 +224,7 @@ def estimate_market_cap(code, close_price):
     shares = _KNOWN_SHARES.get(code, DEFAULT_SHARES)
     return close_price * shares
 
+
 def calculate_forward_pe(close_price, eps_f):
     """計算前瞻本益比 (Forward P/E)。
     若 eps_f 為 0，回傳 None，避免除以零。
@@ -229,6 +232,7 @@ def calculate_forward_pe(close_price, eps_f):
     if eps_f <= 0:
         return None
     return round(close_price / eps_f, 2)
+
 
 def calculate_forward_yield(dividend_yield, pe, forward_pe):
     """利用 5 年平均股息殖利率與前瞻本益比估算前瞻殖利率。
@@ -260,17 +264,19 @@ def build_rankings():
         eps_f = eps_f_data.get(code)
         forward_pe = calculate_forward_pe(price, eps_f) if eps_f is not None else None
         forward_yield = calculate_forward_yield(info.get("yield_pct"), info.get("pe"), forward_pe)
-        twse_caps.append({
-            "code": code,
-            "name": info.get("name", ""),
-            "market_cap": int(mcap),
-            "close": price,
-            "pe": info.get("pe"),
-            "pb": info.get("pb"),
-            "eps_f": eps_f,
-            "forward_pe": forward_pe,
-            "forward_yield": forward_yield,
-        })
+        twse_caps.append(
+            {
+                "code": code,
+                "name": info.get("name", ""),
+                "market_cap": int(mcap),
+                "close": price,
+                "pe": info.get("pe"),
+                "pb": info.get("pb"),
+                "eps_f": eps_f,
+                "forward_pe": forward_pe,
+                "forward_yield": forward_yield,
+            }
+        )
     twse_caps.sort(key=lambda x: x["market_cap"], reverse=True)
     for i, item in enumerate(twse_caps):
         item["rank"] = i + 1
@@ -281,10 +287,17 @@ def build_rankings():
         else:
             item["tier"] = "small_cap"
         rankings["stocks"][item["code"]] = {
-            "market": "TWSE", "rank": item["rank"], "tier": item["tier"],
-            "market_cap": item["market_cap"], "name": item["name"],
-            "close": item["close"], "pe": item.get("pe"), "pb": item.get("pb"),
-            "eps_f": item.get("eps_f"), "forward_pe": item.get("forward_pe"), "forward_yield": item.get("forward_yield"),
+            "market": "TWSE",
+            "rank": item["rank"],
+            "tier": item["tier"],
+            "market_cap": item["market_cap"],
+            "name": item["name"],
+            "close": item["close"],
+            "pe": item.get("pe"),
+            "pb": item.get("pb"),
+            "eps_f": item.get("eps_f"),
+            "forward_pe": item.get("forward_pe"),
+            "forward_yield": item.get("forward_yield"),
         }
     rankings["TWSE"] = twse_caps
 
@@ -292,10 +305,14 @@ def build_rankings():
     otc_caps = []
     for code, info in tpex_data.items():
         mcap = estimate_market_cap(code, info["close"])
-        otc_caps.append({
-            "code": code, "name": info.get("name", ""),
-            "market_cap": int(mcap), "close": info["close"],
-        })
+        otc_caps.append(
+            {
+                "code": code,
+                "name": info.get("name", ""),
+                "market_cap": int(mcap),
+                "close": info["close"],
+            }
+        )
     otc_caps.sort(key=lambda x: x["market_cap"], reverse=True)
     for i, item in enumerate(otc_caps):
         item["rank"] = i + 1
@@ -307,9 +324,14 @@ def build_rankings():
             item["tier"] = "small_cap"
         if item["code"] not in rankings["stocks"]:
             rankings["stocks"][item["code"]] = {
-                "market": "OTC", "rank": item["rank"], "tier": item["tier"],
-                "market_cap": item["market_cap"], "name": item["name"],
-                "close": item["close"], "pe": None, "pb": None,
+                "market": "OTC",
+                "rank": item["rank"],
+                "tier": item["tier"],
+                "market_cap": item["market_cap"],
+                "name": item["name"],
+                "close": item["close"],
+                "pe": None,
+                "pb": None,
             }
     rankings["OTC"] = otc_caps
 
@@ -318,6 +340,7 @@ def build_rankings():
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="市值排名更新工具")
     parser.add_argument("--dry-run", action="store_true", help="僅顯示不寫入")
     parser.add_argument("--stocks", default=None, help="指定股票代碼（逗號分隔）")
@@ -326,19 +349,34 @@ def main():
     print("更新市值排名...")
     rankings = build_rankings()
 
-    print(f"\nTWSE 前 10 大市值:")
+    print("\nTWSE 前 10 大市值:")
     for item in rankings["TWSE"][:10]:
         mcap_yi = item["market_cap"] / 1e8
-        print(f"  {item['rank']:3}. {item['code']} {item['name']:6s} 市值≈{mcap_yi:.0f}億  PE={item.get('pe','?')}")
+        print(
+            f"  {
+                item['rank']:3}. {
+                item['code']} {
+                item['name']:6s} 市值≈{
+                    mcap_yi:.0f}億  PE={
+                        item.get(
+                            'pe',
+                            '?')}"
+        )
 
     if args.stocks:
         targets = args.stocks.split(",")
-        print(f"\n指定股票:")
+        print("\n指定股票:")
         for code in targets:
             info = rankings["stocks"].get(code, {})
             if info:
                 mcap_yi = info["market_cap"] / 1e8
-                print(f"  {code}: {info['market']} #{info['rank']} 市值≈{mcap_yi:.0f}億 tier={info['tier']}")
+                print(
+                    f"  {code}: {
+                        info['market']} #{
+                        info['rank']} 市值≈{
+                        mcap_yi:.0f}億 tier={
+                        info['tier']}"
+                )
             else:
                 print(f"  {code}: 無資料")
 

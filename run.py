@@ -14,6 +14,7 @@ Usage: python run.py [--port 5000] [--no-api] [--skip-preflight]
   --port PORT       dashboard port (預設 5000)
   --skip_close     跳過盤後資料檢查
 """
+
 import argparse
 import csv
 import ctypes
@@ -28,16 +29,16 @@ from datetime import datetime, date, timedelta
 
 # 確保 console 輸出使用 UTF-8（避免 emoji 等字元在 cp950 環境下報錯）
 try:
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     try:
-        sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', errors='replace', closefd=False)
+        sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8", errors="replace", closefd=False)
     except Exception:
         pass
 
 import web_dashboard
 
-#BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PID_FILE = ".dashboard_pid"
 API_FLAG = ".api_active"
 HOLIDAYS_FILE = "holidays.json"
@@ -45,6 +46,7 @@ WATCHLIST_PATH = "watchlist.json"
 STOCK_REF_PATH = "stock_ref.json"
 
 # ---- 工具函數 ----
+
 
 def load_holidays() -> list:
     if os.path.exists(HOLIDAYS_FILE):
@@ -138,6 +140,7 @@ def _cleanup_pid():
 
 # ---- 雙開防護 ----
 
+
 def check_duplicate() -> bool:
     """檢查所有雙開旗標。回傳 True 表示可以繼續啟動。"""
     # 1) dashboard PID
@@ -153,7 +156,7 @@ def check_duplicate() -> bool:
                 print(f"      如需重啟: taskkill /f /pid {api_pid}")
                 return False
             else:
-                print(f"[RUN] 清除殘留 .api_active 旗標")
+                print("[RUN] 清除殘留 .api_active 旗標")
                 _remove_file(API_FLAG)
         except OSError:
             _remove_file(API_FLAG)
@@ -162,14 +165,16 @@ def check_duplicate() -> bool:
 
 # ---- 盤前資料檢查 ----
 
+
 def _yesterday_str(target_date: date = None) -> str:
-    """取得昨日日期字串 YYYYMMDD。""" 
+    """取得昨日日期字串 YYYYMMDD。"""
     if target_date is None:
-        target_date = date.today()    
+        target_date = date.today()
     return (target_date - timedelta(days=1)).strftime("%Y%m%d")
 
-def today_str() ->str:    
-    return (date.today().strftime("%Y%m%d%h%M"))
+
+def today_str() -> str:
+    return date.today().strftime("%Y%m%d%h%M")
 
 
 def _get_watchlist_stocks() -> list:
@@ -180,17 +185,19 @@ def _get_watchlist_stocks() -> list:
     except Exception:
         return ["2330", "2317", "2344"]
 
+
 def get_last_row_optimized(path):
     # 1. 取得今天的日期 (格式為：2026-07-23)
     mtoday = date.today().strftime("%Y%m%d")
-    weekday = date.weekday 
-    #0~6#返回值是一個整數（0 到 6）。📅 星期代碼對照表 0：星期一 (Monday),4：星期五(Friday)5：星期六 (Saturday) 6：星期日 (Sunday)6 ：星期日（星期日）
+    weekday = date.weekday
+    # 0~6#返回值是一個整數（0 到 6）。📅 星期代碼對照表 0：星期一 (Monday),4：星期五(Friday)5：星期六
+    # (Saturday) 6：星期日 (Sunday)6 ：星期日（星期日）
 
     # 1. 先讀取 CSV 的第一行，取得欄位名稱 (Header)
     with open(path, encoding="utf-8-sig", errors="replace") as f:
         reader = csv.reader(f)
         if not reader:
-            return None   # 空檔案
+            return None  # 空檔案
         headers = next(csv.reader(f), None)
 
         # 2. 極速倒退：直接跳到檔尾抓最後一行,以二進位模式開啟，從檔案末尾往前找最後一行
@@ -203,21 +210,22 @@ def get_last_row_optimized(path):
                 except OSError:
                     f.seek(0)
             last_line = f.readline().decode("utf-8-sig", errors="replace").strip()
-    
+
             # 3. 動態綁定：用當下抓到的 Header 與最後一行結合成 Dict (JSON)
             if last_line:
                 # 使用 csv.reader 解析單行，自動處理可能有引號、逗號的欄位內容
                 last_values = next(csv.reader([last_line]))
-    
+
                 # 使用 zip 將 Header 與 數值 1比1 綁定成字典（欄位多或少都能自動對齊）
                 last_row_dict = dict(zip(headers, last_values))
-                return last_row_dict        
-    
+                return last_row_dict
+
+
 def check_yesterday_data() -> list:
     """檢查昨日 @stockID.csv 資料完整性。
     回傳缺少昨收資料的股票代碼清單。
-    """    
-    yesterday = _yesterday_str()    
+    """
+    yesterday = _yesterday_str()
     print(f"[RUN]今天是:{today_str()}  yesterday是:{yesterday}")
 
     stocks = _get_watchlist_stocks()
@@ -225,41 +233,44 @@ def check_yesterday_data() -> list:
     for sid in stocks:
         path = f"@{sid}.csv"
         last_row_dict = get_last_row_optimized(path)
-        #昨日比較
+        # 昨日比較
         try:
             # --- 1. 安全且方便的驗證與取值,就算未來欄位順序換了，這樣拿資料依然絕對安全 ---
-            if last_row_dict:                 
+            if last_row_dict:
                 current_date = last_row_dict.get("日期")
-                if current_date:                    
+                if current_date:
                     # 計算相差天數current_date=CSV 的最後一天
                     days_diff = (today_str() - current_date).days
                     stock_id = sid
                     close_price = last_row_dict.get("收盤價" or 0)
-                    open_price =last_row_dict.get("開盤價" or 0)
+                    open_price = last_row_dict.get("開盤價" or 0)
                     print(f"📊 成功轉換為 JSON 格式：\n{last_row_dict}\n")
-                    print(f"📅 檢查csv欄位：日期={current_date}, 股票代碼={stock_id}, 收盤價={close_price} open_price: {open_price}")
-                    # 3. 比對日期邏輯                                    
-                    if days_diff == 0:                    
+                    print(
+                        f"📅 檢查csv欄位：日期={current_date}, 股票代碼={stock_id}, 收盤價={close_price} open_price: {open_price}"
+                    )
+                    # 3. 比對日期邏輯
+                    if days_diff == 0:
                         print(f"📊 資料是最新的！最後日期就是今天 ({current_date})。")
                         continue
                     elif days_diff == 1:
                         print(f"⚠️ 昨日是 {current_date}")
                         continue
-                    elif days_diff == 2 & today_str().weekday ==0: #周一days_diff=2合理,但未考慮特休
+                    elif days_diff == 2 & today_str().weekday == 0:  # 周一days_diff=2合理,但未考慮特休
                         continue
                     else:
                         print(f"🔮 異常：最後日期 {current_date} 未考慮特休日期或尚未紀錄今日收盤。")
                         missing.append(sid)
                         continue
         except e:
-            print(f"❌ 日期格式解析失敗，請檢查 CSV 欄位文字是否為：{current_date}")                    
+            print(f"❌ 日期格式解析失敗，請檢查 CSV 欄位文字是否為：{current_date}")
             print(f"❌ 無法取得有效的最後一行日期。{e}")
             missing.append(sid)
             continue
 
         except Exception:
-            missing.append(sid) #except
+            missing.append(sid)  # except
     return missing
+
 
 def check_stock_ref_coverage() -> list:
     """檢查 stock_ref.json 是否涵蓋所有自選股且有完整參考價。"""
@@ -280,7 +291,7 @@ def check_stock_ref_coverage() -> list:
 def run_preflight(args, check_date_str: str = None) -> bool:
     """盤前檢查：昨日資料 + stock_ref.json。
     回傳 True 表示檢查通過（或跳過）。"""
-    if hasattr(args,'skip_preflight'):
+    if hasattr(args, "skip_preflight"):
         print("[RUN] 跳過盤前檢查 (--skip-preflight)")
         return True
 
@@ -290,12 +301,16 @@ def run_preflight(args, check_date_str: str = None) -> bool:
     missing_yesterday = check_yesterday_data(check_date_str)
     if missing_yesterday:
         print(f"[RUN] ⚠ 缺少昨日收盤資料: {missing_yesterday}")
-        print("[RUN] 自動執行 fetch_daily_close.py ....從公開資訊站(TWSE/TPEx) 取得每日收盤數據，寫入 @stockID.csv 與 stock_ref.json..")
+        print(
+            "[RUN] 自動執行 fetch_daily_close.py ....從公開資訊站(TWSE/TPEx) 取得每日收盤數據，寫入 @stockID.csv 與 stock_ref.json.."
+        )
         try:
             result = subprocess.run(
                 [sys.executable, "fetch_daily_close.py"],
-                capture_output=True, text=True, timeout=150,
-                cwd=os.path.dirname(os.path.abspath(__file__))
+                capture_output=True,
+                text=True,
+                timeout=150,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
             )
             if result.returncode == 0:
                 print("[RUN] fetch_daily_close.py 完成")
@@ -330,7 +345,7 @@ def run_preflight(args, check_date_str: str = None) -> bool:
     print("[RUN] 盤前檢查完成")
     return True
 
-      
+
 def _run_financials_update():
     """執行 update_financials.py 確保 stock_financials.json 存在且涵蓋所有自選股。"""
     fin_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stock_financials.json")
@@ -354,8 +369,10 @@ def _run_financials_update():
     try:
         result = subprocess.run(
             [sys.executable, "update_financials.py"],
-            capture_output=True, text=True, timeout=60,
-            cwd=os.path.dirname(os.path.abspath(__file__))
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
         )
         if result.returncode == 0:
             print("[RUN] stock_financials.json 更新完成")
@@ -373,10 +390,7 @@ def _run_analyst_eps_update():
     try:
         with open(analyst_path, encoding="utf-8") as f:
             data = json.load(f)
-        has_manual = any(
-            s.get("manual_eps") is not None
-            for s in data.get("stocks", {}).values()
-        )
+        has_manual = any(s.get("manual_eps") is not None for s in data.get("stocks", {}).values())
         if not has_manual:
             return
     except Exception:
@@ -385,10 +399,11 @@ def _run_analyst_eps_update():
     print("[RUN] 更新 PEG (analyst_eps.json → 根據收盤價)...")
     try:
         result = subprocess.run(
-            [sys.executable, "fetch_analyst_eps.py", "--stocks",
-             ",".join(_get_watchlist_stocks())],
-            capture_output=True, text=True, timeout=60,
-            cwd=os.path.dirname(os.path.abspath(__file__))
+            [sys.executable, "fetch_analyst_eps.py", "--stocks", ",".join(_get_watchlist_stocks())],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
         )
         if result.returncode == 0:
             print("[RUN] PEG 更新完成")
@@ -399,6 +414,7 @@ def _run_analyst_eps_update():
 
 
 # ---- 主流程 ----
+
 
 def main():
     parser = argparse.ArgumentParser(description="Yuanta OneAPI 每日一站式啟動器")
@@ -420,17 +436,17 @@ def main():
         reason = "週末" if today.weekday() >= 5 else "休市日"
         print(f"[RUN] 今日 ({today} {day_names[today.weekday()]}) 為{reason}，不啟動")
         return
-    
+
     if status == "closed" and not args.skip_close:
-        print(f"[RUN] 已收盤 (14:30+)，不啟動。使用 sim_run2.py 進行模擬測試。")
+        print("[RUN] 已收盤 (14:30+)，不啟動。使用 sim_run2.py 進行模擬測試。")
         return
-    
+
     print(f"[RUN] 市場狀態: {status} args:{args}")
     # ---- 動態決定資料校驗基準日 ----
     # 如果開啟了 skip_closed，代表我們要校驗「今天當天」的收盤資料，否則預設校驗「昨天」
-    target_date_str = date.today().strftime("%Y%m%d") 
-    if hasattr(args, 'skip_closed'):
-        #args.skip_closed:
+    target_date_str = date.today().strftime("%Y%m%d")
+    if hasattr(args, "skip_closed"):
+        # args.skip_closed:
         target_date_str = date.today().strftime("%Y%m%d")
     else:
         target_date_str = _yesterday_str()
@@ -450,9 +466,12 @@ def main():
             api_proc = subprocess.Popen(
                 [sys.executable, "-B", "-X", "utf8", "YuantaAPI_Pythonnet.py"],
                 cwd=os.path.dirname(os.path.abspath(__file__)),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace",
-                env=env
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
             )
             print(f"[RUN] API 子程序已啟動 (PID={api_proc.pid})")
 
@@ -465,10 +484,7 @@ def main():
                 except Exception:
                     pass
 
-            reader_thread = threading.Thread(
-                target=_read_api_stdout, args=(api_proc, "API"),
-                daemon=True
-            )
+            reader_thread = threading.Thread(target=_read_api_stdout, args=(api_proc, "API"), daemon=True)
             reader_thread.start()
 
             # 等待 API 初始化完成（登入 + 首次訂閱），最多等 30 秒
@@ -478,16 +494,19 @@ def main():
                 time.sleep(1)
                 # 檢查子程序是否還活著
                 if api_proc.poll() is not None:
-                    print(f"[RUN] ⚠ API 子程序已退出 (returncode={api_proc.returncode})")
+                    print(
+                        f"[RUN] ⚠ API 子程序已退出 (returncode={
+                            api_proc.returncode})"
+                    )
                     break
                 # 檢查 .api_active 旗標（登入成功後 show() 才會建立）
                 if os.path.exists(api_flag_path):
                     api_ready = True
-                    print(f"[RUN] ✅ API 初始化完成（.api_active 已出現）")
+                    print("[RUN] ✅ API 初始化完成（.api_active 已出現）")
                     break
             else:
-                print(f"[RUN] ⚠ API 初始化逾時 (30s)，將繼續啟動 dashboard")
-                print(f"[RUN]    若 CSV 無產出，請手動執行 YuantaAPI_Pythonnet.py")
+                print("[RUN] ⚠ API 初始化逾時 (30s)，將繼續啟動 dashboard")
+                print("[RUN]    若 CSV 無產出，請手動執行 YuantaAPI_Pythonnet.py")
 
             if api_ready:
                 # 二次驗證：等待 CSV 實際產出
@@ -496,7 +515,8 @@ def main():
                 for _ in range(csv_check_timeout):
                     time.sleep(1)
                     # 檢查任一主要股票的 CSV 是否有寫入（mtime > 30 秒內）? 萬一自選股,沒有2330,2317 ???
-                    for test_id in _get_watchlist_stocks():  #["2330", "2317"]:
+                    # ["2330", "2317"]:
+                    for test_id in _get_watchlist_stocks():
                         csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{test_id}.csv")
                         if os.path.exists(csv_path):
                             csv_age = time.time() - os.path.getmtime(csv_path)
@@ -508,10 +528,10 @@ def main():
                         break
                 if not csv_confirmed:
                     print(f"[RUN] ⚠ 逾時等待 CSV 產出 ({csv_check_timeout}s)，可能訂閱無資料")
-                    print(f"[RUN]    請檢查帳號登入狀態及網路連線")
+                    print("[RUN]    請檢查帳號登入狀態及網路連線")
             else:
                 # 再等 3 秒給登入回應
-                print(f"[RUN] ⚠ 再等 5 秒給登入回應")
+                print("[RUN] ⚠ 再等 5 秒給登入回應")
                 time.sleep(5)
         except Exception as e:
             print(f"[RUN] API 啟動失敗: {e}")
@@ -525,8 +545,7 @@ def main():
     try:
         poll_thread = threading.Thread(target=web_dashboard.poll_worker, daemon=True)
         poll_thread.start()
-        web_dashboard.app.run(host="0.0.0.0", port=args.port,
-                              debug=False, threaded=True)
+        web_dashboard.app.run(host="0.0.0.0", port=args.port, debug=False, threaded=True)
     except KeyboardInterrupt:
         print("\n[RUN] 收到中斷訊號")
     finally:

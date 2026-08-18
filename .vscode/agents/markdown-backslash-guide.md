@@ -97,4 +97,3 @@ if \_\_name\_\_ == "\_\_main\_\_":
 &#x20;   sample\_path = r"C:\\\\Users\\\\user\\\\.vscode"
 
 &#x20;   print(generate\_markdown\_examples(sample\_path))
-

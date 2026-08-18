@@ -40,8 +40,7 @@ Client Request Id: 0e7599ab-7986-42a9-88ea-081f0fa72835
 Reason: Ollama /api/chat failed with HTTP 500: error parsing tool call: raw='{"includeIgnored...","...":"/Yuaran..."}', err=invalid character ',' after object key: Error: Ollama /api/chat failed with HTTP 500: error parsing tool call: raw='{"includeIgnored...","...":"/Yuaran..."}', err=invalid character ',' after object key at throwIfNotOK (
 
 c:\Users\user.vscode\extensions\ollama.ollama-0.0.8\out\provider.js:739:11
-) at process.processTicksAndRejections (node:internal/process/task_queues:104:5) at async 
+) at process.processTicksAndRejections (node:internal/process/task_queues:104:5) at async
 c:\Users\user.vscode\extensions\ollama.ollama-0.0.8\out\provider.js:700:9 at async post (
 c:\Users\user.vscode\extensions\ollama.ollama-0.0.8\node_modules\ollama\dist\browser.cjs:154:20) at async Ollama.processStreamableRequest (
 c:\Users\user.vscode\extensions\ollama.ollama-0.0.8\node_modules\ollama\dist\browser.cjs:280:25)
-

@@ -39,7 +39,7 @@ CSV文件存儲歷史市場數據
 
 ├── stock\_ref.json          # 股票基礎信息存儲文件
 ├── \*.csv                   # 各股票的歷史數據文件（按stock\_id命名）
-├── YuantaAPI_Pythonnet.py        # 主腳本，負責數據抓取與存儲（原文件名有拼寫錯誤 “Jasov”）
+├── YuantaAPI_Pythonnet.py   # 主腳本，負責數據抓取與存儲（原文件名有拼寫錯誤 “Jasov”）
 ├── validate\_stock\_data.py  # 數據驗證工具
 └── README.md               # 項目文檔
 
@@ -53,7 +53,7 @@ pip install requests pandas matplotlib
 todo:配置參數,計畫整合修改流程
 jsonCsvUpdate.py，
 
-&#x20;├─── 第一步先整合 1.YuantaAPI\_Pythonnet.py,  2.jsonCsvUpdate.py 與 3. SocketStats.py 
+&#x20;├─── 第一步先整合 1.YuantaAPI\_Pythonnet.py,  2.jsonCsvUpdate.py 與 3. SocketStats.py
 
 &#x20;├─── 建議移除YuantaAPI\_Pythonnet.py 的 DEFAULT\_STOCK\_STRUCTURE and def \_save\_stock\_ref\_json():(1.的上方 3416行) 將被jsonCsvUpdate.py 取代
 
@@ -61,7 +61,7 @@ jsonCsvUpdate.py，
 
 &#x20; ├─── 主程式發送登入後 ,會先收到證卷ack登入成功,這時 asyc show() 將進入等待至少1秒,接收執行續會繼續->期貨登入->海外證卷期貨登入只少3-5秒,才能完成登入
 
-&#x20;├─── 國內證卷登入成功一秒後,可利用這段期間初始化 jsonCsvUpdate.PY ,至  SubscribeWatchlistAll\_api證卷訂閱 ->到確認 ReadWatchListAll\_Out() \*\* 重點取代部分
+&#x20;├─── 國內證卷登入成功要等收到回應ack才叫登入成功,(至少有3秒時間後台還繼續其他還內外期貨需要登入,)我們至少等一秒以後,可利用這段期間初始化 jsonCsvUpdate.PY ,至  SubscribeWatchlistAll\_api證卷訂閱 ->到確認 ReadWatchListAll\_Out() \*\* 重點取代部分,ps:太快請求server可能容易異常
 
 &#x20;├── \*\* 重點取代部分 a. 初始化時將\_save\_stock\_ref\_json()首次擴充,並初始化,保存至全局變數 SUBSCRIPTION\_STATE
 
@@ -90,7 +90,7 @@ python 1.YuantaAPI\_Pythonnet.py,  2.jsonCsvUpdate.py 與 3. SocketStats.py 須�
 "decimal": 4,
 "credit\_pct": 0,
 "bond\_pct": 0
-...... 
+......
 },
 // 其他股票信息...
 }

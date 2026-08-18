@@ -4,7 +4,7 @@
 
 ### Problem: `taskkill /f /im python.exe` doesn't kill anything
 
-Windows Store Python uses `python3.13.exe`. Universal kill command:
+Windows Store Python uses `python3.14.exe`. Universal kill command:
 
 ```powershell
 # PowerShell — kills ALL Python variants
@@ -71,10 +71,10 @@ Remove-Item *.csv -Exclude '@*.csv'
 **Check**: `curl http://localhost:5000/api/watchlists` — confirms active watchlist.
 `curl http://localhost:5000/api/stocks` — confirms stocks returned.
 
-**Root cause 1**: No CSV files exist for the new watchlist's stocks.  
+**Root cause 1**: No CSV files exist for the new watchlist's stocks.
 **Fix**: Simulator reads `watchlist.json` automatically — add stock to JSON, data appears within 5s.
 
-**Root cause 2**: `--stocks` CLI argument had a hardcoded default overriding the watchlist reader.  
+**Root cause 2**: `--stocks` CLI argument had a hardcoded default overriding the watchlist reader.
 **Fix**: Set `default=None` and read from `watchlist.json` when not specified.
 
 ### Problem: Browser shows stale data after server restart

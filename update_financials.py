@@ -19,45 +19,45 @@ PEG 公式:
 
 排程: 每季財報公布後（5/15, 8/14, 11/14, 3/31 前後）執行
 """
+
 import json
 import os
 import ssl
-import sys
 from datetime import datetime
 from urllib.request import urlopen, Request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(BASE_DIR, "stock_financials.json")
 # ---- 近四季 EPS（手動維護，每季更新） ----
-#SUB-AGENTS,_QUARTERLY_EPS 每季設法更新,並註明updated TIME LIKE, python update_financials.py -> stock_financials.json
-# 資料來源: 優先TWSE 個股財報 → 基本每股盈餘, 
+# SUB-AGENTS,_QUARTERLY_EPS 每季設法更新,並註明updated TIME LIKE, python update_financials.py -> stock_financials.json
+# 資料來源: 優先TWSE 個股財報 → 基本每股盈餘,
 # 格式: {code: [Q1_EPS, Q2_EPS, Q3_EPS, Q4_EPS]} (最近四季，從最早到最新)
 # **此處為 2026Q1 示範值(非實際值)，實際需每季更新,AI TODO RIGHT NOW**
 # 一次拿到全市場近四季 EPS 排行200  https://www.wantgoo.com/stock/ranking/trailing-eps?market=Listed
-#一次拿到半導體近四季 EPS 排行 https://www.wantgoo.com/stock/ranking/trailing-eps?market=Listed&industry=^024
-#一次拿到零組件近四季 EPS 排行https://www.wantgoo.com/stock/ranking/trailing-eps?market=Listed&industry=^028
-#一次拿到航運近四季 EPS 排行https://www.wantgoo.com/stock/ranking/trailing-eps?market=Listed&industry=^033
-#一次拿到指定個股近四季 EPS https://goodinfo.tw/tw/StockFinDetail.asp?RPT_CAT=IS_M_QUAR_ACC&STOCK_ID=2317
+# 一次拿到半導體近四季 EPS 排行 https://www.wantgoo.com/stock/ranking/trailing-eps?market=Listed&industry=^024
+# 一次拿到零組件近四季 EPS 排行https://www.wantgoo.com/stock/ranking/trailing-eps?market=Listed&industry=^028
+# 一次拿到航運近四季 EPS 排行https://www.wantgoo.com/stock/ranking/trailing-eps?market=Listed&industry=^033
+# 一次拿到指定個股近四季 EPS https://goodinfo.tw/tw/StockFinDetail.asp?RPT_CAT=IS_M_QUAR_ACC&STOCK_ID=2317
 # 請ai代勞,上面方法得到此表取得正確值,並擴充 load_watchlist_stocks.json的所有自選股,去從
 # ---- 近四季 EPS（手動維護，每季更新updated TIME2026-07-01）TODO: sub-agent 根據個股財報,取得正確近4季EPS** ----
-_QUARTERLY_EPS = {  
+_QUARTERLY_EPS = {
     "2330": [22.08, 19.51, 17.44, 15.36],  # 台積電 2025Q2~2026Q1 ✅
-    "2317": [2.83, 3.15, 2.98, 3.56],       # 鴻海✅
-    "2454": [16.50, 18.20, 17.80, 15.17],   # 聯發科✅
-    "2344": [0.35, 0.42, 0.38, 0.45],       # 華邦電✅
-    "2356": [0.85, 0.92, 0.88, 0.95],       # 英業達✅
-    "2609": [1.20, 1.35, 1.28, 1.42],       # 陽明✅
-    "2610": [0.25, 0.28, 0.26, 0.30],       # 華航✅
-    "2303": [1.10, 1.18, 1.15, 1.25],       # 聯電✅
-    "2412": [1.20, 1.25, 1.22, 1.28],       # 中華電✅y
-    "2881": [0.85, 0.92, 0.88, 0.95],       # 富邦金
-    "2882": [5.5, 5.76, 4.26, 4.37],       # 國泰金   ✅ 
-    "6412": [1.01, 1.18, 1.85, 1.17],       # 群電✅
-    "6122": [1.03,1.33,1.23,1.08],       # 6122 擎邦✅
-    "6123": [0.7,0.74,0.68,0.7],       # 6123 上奇✅
-    "8936": [0.99,1.13,1.34,0.87],       # 國統✅
-    "2535": [2.88, 6.5, 4.37, 2.61],         #達欣工✅
-    "3019": [1.05, 1.09,1.86, 2.86]        #亞光✅
+    "2317": [2.83, 3.15, 2.98, 3.56],  # 鴻海✅
+    "2454": [16.50, 18.20, 17.80, 15.17],  # 聯發科✅
+    "2344": [0.35, 0.42, 0.38, 0.45],  # 華邦電✅
+    "2356": [0.85, 0.92, 0.88, 0.95],  # 英業達✅
+    "2609": [1.20, 1.35, 1.28, 1.42],  # 陽明✅
+    "2610": [0.25, 0.28, 0.26, 0.30],  # 華航✅
+    "2303": [1.10, 1.18, 1.15, 1.25],  # 聯電✅
+    "2412": [1.20, 1.25, 1.22, 1.28],  # 中華電✅y
+    "2881": [0.85, 0.92, 0.88, 0.95],  # 富邦金
+    "2882": [5.5, 5.76, 4.26, 4.37],  # 國泰金   ✅
+    "6412": [1.01, 1.18, 1.85, 1.17],  # 群電✅
+    "6122": [1.03, 1.33, 1.23, 1.08],  # 6122 擎邦✅
+    "6123": [0.7, 0.74, 0.68, 0.7],  # 6123 上奇✅
+    "8936": [0.99, 1.13, 1.34, 0.87],  # 國統✅
+    "2535": [2.88, 6.5, 4.37, 2.61],  # 達欣工✅
+    "3019": [1.05, 1.09, 1.86, 2.86],  # 亞光✅
 }
 
 
@@ -77,9 +77,10 @@ def fetch_eps_from_bwibbu_all(stock_code):
         print(f"Error fetching EPS for {stock_code} from BWIBBU_ALL: {e}")
         return None
 
+
 def fetch_eps_from_wantgoo(stock_code):
     """嘗試從 WantGoo API（例如 https://www.wantgoo.com/stock/ranking/trailing-eps?market=Listed）取得近四季 EPS,ROE,ROA,per,pbr,財報三率%,營收成長率%。"""
-    url = f"https://www.wantgoo.com/stock/ranking/trailing-eps?market=Listed"
+    url = "https://www.wantgoo.com/stock/ranking/trailing-eps?market=Listed"
     try:
         response = urlopen(Request(url, headers={"User-Agent": "Mozilla/5.0"}), context=_ssl_ctx())
         data = json.loads(response.read().decode("utf-8"))
@@ -108,8 +109,9 @@ def fetch_eps_from_goodInfo(stock_code):
     """嘗試從 goodinfo API（例如 https://goodinfo.tw/tw/StockFinDetail.asp?RPT_CAT=IS_{rpt_cat_suffix}&STOCK_ID={stock_code}取得近四季 EPS。"""
     rpt_cat_suffix = "M_QUAR"
     url_is = f"https://goodinfo.tw/tw/StockFinDetail.asp?RPT_CAT=IS_{rpt_cat_suffix}&STOCK_ID={stock_code}"
-    try:        
-        resp_is = requests.get(url_is, headers=headers); resp_is.encoding="utf-8"
+    try:
+        resp_is = requests.get(url_is, headers=headers)
+        resp_is.encoding = "utf-8"
         soup_is = BeautifulSoup(resp_is.text, "html.parser")
         eps = extract_values(soup_is, "每股稅後盈餘")
         eps_calc_values = eps
@@ -117,19 +119,19 @@ def fetch_eps_from_goodInfo(stock_code):
     except Exception as e:
         print(f"Error fetching EPS for {stock_code} from goodinfo: {e}")
         return None
-                
-        
+
+
 def get_quarterly_eps_from_api(stock_code):
     """嘗試從 reliable API（例如 BWIBBU_ALL）取得近四季 EPS。
     假设 BWIBBU_ALL 返回一个包含eps、bps、發行股數、每股單價的字典。"""
-    manual_override=load_analyst_eps().get(stock_code)
+    manual_override = load_analyst_eps().get(stock_code)
     eps_data = fetch_eps_from_api(stock_code)
-    if not eps_data:       
+    if not eps_data:
         eps_data = fetch_eps_from_goodInfo(stock_code)
         if not eps_data:
             return {manual_override}
     return eps_data
-    
+
 
 def calculate_peg(pe, eps_4q):
     """計算 PEG。
@@ -155,9 +157,9 @@ def calculate_peg(pe, eps_4q):
     peg = round(pe / growth_pct, 2)
     return {"peg": peg, "ttm_eps": round(ttm_eps, 2), "growth_pct": round(growth_pct, 1)}
 
-    
+
 def load_market_cap():
-    """從 market_cap.json 讀取百大otc清單。"""    
+    """從 market_cap.json 讀取百大otc清單。"""
 
     try:
         with open(os.path.join(BASE_DIR, "market_cap.json"), encoding="utf-8") as f:
@@ -173,7 +175,6 @@ def _ssl_ctx():
     return ctx
 
 
-
 def load_watchlist_stocks():
     """從 watchlist.json 讀取自選股清單。"""
     try:
@@ -183,6 +184,7 @@ def load_watchlist_stocks():
     except Exception:
         return ["2330", "2317", "2344"]
 
+
 def load_analyst_eps():
     """從 analyst_eps.json manual_eps.eps if "method": "manual_override"=load_analyst_eps()。"""
     try:
@@ -190,10 +192,11 @@ def load_analyst_eps():
             config = json.load(f)
         return config.get("stocks", {})
     except Exception:
-        return config.get("stocks",{})
+        return config.get("stocks", {})
+
 
 def build_financials(stocks=None):
-    """建立財務數據 dict。"""    
+    """建立財務數據 dict。"""
     mcap = load_market_cap()
     stocks_data = mcap.get("stocks", {})
 
@@ -201,24 +204,24 @@ def build_financials(stocks=None):
         # 優先處理自選股，再補 _QUARTERLY_EPS 中的股票
         stocks = list(set(load_watchlist_stocks()) | set(_QUARTERLY_EPS.keys()))
 
-    result = {"updated": datetime.now().isoformat(), "used" : "update_financials.py" ,"stocks": {}}
+    result = {"updated": datetime.now().isoformat(), "used": "update_financials.py", "stocks": {}}
     watchlist = load_watchlist_stocks()
     for code in stocks:
         sym_str = str(code).strip()
         # 1. 排除 ETF、主動型型基金、權證與債券期貨邏輯,不同類型TODO:關注不同焦點
         if (
-            sym_str.startswith("00") or   # 標準台股 ETF (如 0050)
-            sym_str.startswith("01") or   # 不動產投資信託 (REITs)
-            sym_str.startswith("03") or   # 權證
-            sym_str.startswith("TX") or   # 台指期 期貨型
-            sym_str.endswith("A") or      # 主動型 ETF (如 XXXXA) 🌟 新增
-            sym_str.endswith("B") or      # 債券型 ETF (如 00679B)
-            sym_str.endswith("U") or      # 期貨型 ETF (如 00642U)
-            sym_str.endswith("R")         # 反向型 ETF (如 00632R)
+            sym_str.startswith("00")  # 標準台股 ETF (如 0050)
+            or sym_str.startswith("01")  # 不動產投資信託 (REITs)
+            or sym_str.startswith("03")  # 權證
+            or sym_str.startswith("TX")  # 台指期 期貨型
+            or sym_str.endswith("A")  # 主動型 ETF (如 XXXXA) 🌟 新增
+            or sym_str.endswith("B")  # 債券型 ETF (如 00679B)
+            or sym_str.endswith("U")  # 期貨型 ETF (如 00642U)
+            or sym_str.endswith("R")  # 反向型 ETF (如 00632R)
         ):
-            # print(f"跳過 ETF/主動型/權證: {sym_str}") 
+            # print(f"跳過 ETF/主動型/權證: {sym_str}")
             continue
-        entry = stocks_data.get(code, {})   # 2. 獲取該股票的財務原始資料
+        entry = stocks_data.get(code, {})  # 2. 獲取該股票的財務原始資料
         pe = entry.get("pe")
         pb = entry.get("pb")
         eps_q = _QUARTERLY_EPS.get(code)
@@ -246,10 +249,12 @@ def build_financials(stocks=None):
             "eps_growth_pct": peg_info["growth_pct"] if peg_info else None,
             "peg": peg_info["peg"] if peg_info else None,
             "eps_quarters": eps_q,
-            "peg_note": "近四季EPS (YoY半年成長率)" if peg_info else (
-                "負成長，PEG無意義" if eps_q else (
-                    "無EPS資料，需手動填入analyst_eps.json" if is_watchlist else "無EPS資料"
-                )
+            "peg_note": "近四季EPS (YoY半年成長率)"
+            if peg_info
+            else (
+                "負成長，PEG無意義"
+                if eps_q
+                else ("無EPS資料，需手動填入analyst_eps.json" if is_watchlist else "無EPS資料")
             ),
         }
     return result
@@ -257,6 +262,7 @@ def build_financials(stocks=None):
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="財務數據更新工具")
     parser.add_argument("--stocks", default=None, help="指定股票代碼（逗號分隔）")
     args = parser.parse_args()
@@ -269,15 +275,20 @@ def main():
 
     print(f"stock_financials.json 已更新 ({len(data['stocks'])} 檔):")
     for code, info in sorted(data["stocks"].items()):
-        peg_str = f"PEG={info['peg']}" if info['peg'] else f"({info['peg_note']})"
-        print(f"  {code}: PE={info['pe']} PB={info['pb']} EPS_TTM={info['eps_ttm']} {peg_str}")
+        peg_str = f"PEG={info['peg']}" if info["peg"] else f"({info['peg_note']})"
+        print(
+            f"  {code}: PE={
+                info['pe']} PB={
+                info['pb']} EPS_TTM={
+                info['eps_ttm']} {peg_str}"
+        )
 
 
 if __name__ == "__main__":
     main()
 
-'''
+"""
 taskschd.msc
 设置定时任务
 建立bat定時每季啟動更新Eps,失敗隔天再試,直到完成
-'''
+"""

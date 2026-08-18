@@ -11,7 +11,6 @@ API 運行時由 YuantaAPI_Pythonnet.py 的 _write_snapshots() 直接寫入，�
 import csv
 import json
 import os
-import sys
 import time
 import argparse
 
@@ -116,14 +115,16 @@ def write_snapshot(stock_id):
         out_vol = _ni(r.get("total_out_volume"))
         amt = float(r.get("deal_amount", 0) or 0)
         if vol > 0 or in_vol > 0 or out_vol > 0:
-            records.append({
-                "time": r.get("timestamp", "")[-8:],
-                "price": price,
-                "vol": vol,
-                "in_vol": in_vol,
-                "out_vol": out_vol,
-                "amt": max(0, amt),
-            })
+            records.append(
+                {
+                    "time": r.get("timestamp", "")[-8:],
+                    "price": price,
+                    "vol": vol,
+                    "in_vol": in_vol,
+                    "out_vol": out_vol,
+                    "amt": max(0, amt),
+                }
+            )
 
     snap = {
         "timestamp": row.get("timestamp", ""),

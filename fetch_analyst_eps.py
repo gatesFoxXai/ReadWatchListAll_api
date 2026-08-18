@@ -1,4 +1,4 @@
- #!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 法人預估 EPS 聚合器 — 多來源收集 + 去除極端值 + 每日動態更新 PEG。(目標成為5分k動態更新)
@@ -25,18 +25,18 @@
 OUTPUT_FILE : analyst_eps.json
 排程: 每日收盤後執行（run.py 自動觸發）
 """
+
 import json
 import os
 import re
 import ssl
-import sys
 from datetime import datetime
 from statistics import median
 from urllib.request import urlopen, Request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(BASE_DIR, "analyst_eps.json")
-#market_cap 市場大型0050,中大型0051,oct大型50,OTC中大型100 Market
+# market_cap 市場大型0050,中大型0051,oct大型50,OTC中大型100 Market
 MCAP_FILE = os.path.join(BASE_DIR, "market_cap.json")
 
 
@@ -58,14 +58,13 @@ def _ssl_ctx():
 
 # ---- 來源 A: Yahoo Finance TW ----
 
+
 def fetch_yahoo_analyst_eps(stock_code):
     """從 Yahoo Finance TW 股票頁面爬取分析師 EPS 預估。
     台灣股票代碼: {code}.TW (上市) 或 {code}.TWO (上櫃)"""
     suffix = ".TW" if stock_code[0] != "8" else ".TWO"
     url = f"https://tw.stock.yahoo.com/quote/{stock_code}{suffix}/analysis"
-    req = Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    })
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
     estimates = []
     try:
         with urlopen(req, timeout=15, context=_ssl_ctx()) as resp:
@@ -76,10 +75,10 @@ def fetch_yahoo_analyst_eps(stock_code):
     # 從頁面擷取 EPS 相關數字
     # Yahoo TW 分析頁面可能包含分析師目標價和 EPS
     patterns = [
-        r'每股盈餘[^0-9]*?(\d+\.?\d*)',  # 每股盈餘 12.34
-        r'EPS[^0-9]*?(\d+\.?\d*)',       # EPS: 12.34
-        r'預估.*?(\d+\.?\d+)',            # 預估 12.34
-        r'本益比[^0-9]*?(\d+\.?\d*)',    # 本益比推算
+        r"每股盈餘[^0-9]*?(\d+\.?\d*)",  # 每股盈餘 12.34
+        r"EPS[^0-9]*?(\d+\.?\d*)",  # EPS: 12.34
+        r"預估.*?(\d+\.?\d+)",  # 預估 12.34
+        r"本益比[^0-9]*?(\d+\.?\d*)",  # 本益比推算
     ]
     for pat in patterns:
         matches = re.findall(pat, html, re.IGNORECASE)
@@ -90,19 +89,20 @@ def fetch_yahoo_analyst_eps(stock_code):
                     estimates.append(val)
             except ValueError:
                 pass
-    print(f'fetch_yahoo_analyst_eps Yahoo{stock_code} {estimates} todo:不會到此表示有問題,爬從方式高頻容易被擋,透過ai總結較容易拿到')
+    print(
+        f"fetch_yahoo_analyst_eps Yahoo{stock_code} {estimates} todo:不會到此表示有問題,爬從方式高頻容易被擋,透過ai總結較容易拿到"
+    )
     return estimates
 
 
 # ---- 來源 B: Google Finance ----
 
+
 def fetch_google_finance_eps(stock_code):
     """從 Google Finance 搜尋分析師 EPS 預估。"""
     suffix = "TWSE" if stock_code[0] != "8" else "TPEX"
     url = f"https://www.google.com/finance/quote/{stock_code}:{suffix}"
-    req = Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    })
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
     estimates = []
     try:
         with urlopen(req, timeout=15, context=_ssl_ctx()) as resp:
@@ -110,7 +110,7 @@ def fetch_google_finance_eps(stock_code):
     except Exception:
         return estimates
     # 擷取數字（Google Finance 顯示分析師數據）
-    pats = [r'(\d+\.?\d*)\s*EPS', r'EPS\s*[:\-]?\s*(\d+\.?\d*)']
+    pats = [r"(\d+\.?\d*)\s*EPS", r"EPS\s*[:\-]?\s*(\d+\.?\d*)"]
     for pat in pats:
         for m in re.findall(pat, html, re.IGNORECASE):
             try:
@@ -119,15 +119,20 @@ def fetch_google_finance_eps(stock_code):
                     estimates.append(val)
             except ValueError:
                 pass
-    print(f'fetch_google_finance_eps Google{stock_code} {estimates}')
+    print(f"fetch_google_finance_eps Google{stock_code} {estimates}")
     return estimates
 
+
 # ---- 來源 c: GoogINFO Finance 降級 (stock_financials.json) ----
+
+
 def get_GoogINFO_eps(stock_code):
     return estimates
+
+
 # ---- 來源 D: 近四季 EPS 降級 (stock_financials.json) ----
-#def fetch_goodInfo_finance_eps(stock_code):
-    
+# def fetch_goodInfo_finance_eps(stock_code):
+
 
 def get_trailing_eps(stock_code):
     """從 stock_financials.json 取得近四季合計 EPS 作為降級備援。python update_financials.py"""
@@ -147,6 +152,7 @@ def get_trailing_eps(stock_code):
 
 # ---- 核心: 極端值處理 + 共識計算 ----
 
+
 def trimmed_mean(values, trim_pct=0.20):
     """去除最高/最低 trim_pct% 後取平均。
     例: trim_pct=0.20 → 去掉最高 20% 和最低 20%，取中間 60% 平均。
@@ -158,7 +164,7 @@ def trimmed_mean(values, trim_pct=0.20):
         return median(values)
     sorted_vals = sorted(values)
     trim_n = max(1, int(n * trim_pct))
-    trimmed = sorted_vals[trim_n:n - trim_n]
+    trimmed = sorted_vals[trim_n : n - trim_n]
     if not trimmed:
         return median(values)
     return round(sum(trimmed) / len(trimmed), 2)
@@ -236,6 +242,7 @@ def calculate_peg_dynamic(stock_code, consensus_eps, close_price):
 1. 優先法人分析師自選股的 EPS 預估,from market_cap.json 全市場TWSE_large_top50,TWSE_mid_51_150,OTC_large_top50,OTC_mid_51_100
 """
 
+
 def fetch_all(stocks=None, dry_run=False):
     """更新所有自選股的分析師 EPS 預估。"""
     if stocks is None:
@@ -252,7 +259,7 @@ def fetch_all(stocks=None, dry_run=False):
         with open(MCAP_FILE, encoding="utf-8") as f:
             mcap = json.load(f).get("stocks", {})
 
-    result = {"updated": datetime.now().isoformat(),"used" : "fetch_analyst_eps.py"',', "stocks": {}}
+    result = {"updated": datetime.now().isoformat(), "used": "fetch_analyst_eps.py" ",", "stocks": {}}
 
     for code in stocks:
         print(f"[{code}] 收集分析師預估...")
@@ -263,7 +270,7 @@ def fetch_all(stocks=None, dry_run=False):
 
         # 若無爬取結果，使用手動輸入值或近四季 EPS
         if consensus is None:
-            manual = existing.get("stocks", {}).get(code, {}).get("manual_eps",{})
+            manual = existing.get("stocks", {}).get(code, {}).get("manual_eps", {})
             if manual:
                 consensus = manual
                 aggregate["method"] = "manual_override"
@@ -280,9 +287,11 @@ def fetch_all(stocks=None, dry_run=False):
 
         # 輸出摘要
         if peg_info:
-            print(f"  → 共識EPS={consensus}, PE(fwd)={peg_info['forward_pe']}, "
-                  f"成長={peg_info.get('eps_growth_pct','?')}%, PEG={peg_info.get('peg','--')} "
-                  f"[{aggregate['method']}]")
+            print(
+                f"  → 共識EPS={consensus}, PE(fwd)={peg_info['forward_pe']}, "
+                f"成長={peg_info.get('eps_growth_pct', '?')}%, PEG={peg_info.get('peg', '--')} "
+                f"[{aggregate['method']}]"
+            )
         else:
             print(f"  → 共識EPS={consensus} [{aggregate['method']}] (PEG: 資料不足)")
 
@@ -306,6 +315,7 @@ def fetch_all(stocks=None, dry_run=False):
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="法人預估 EPS 聚合器")
     parser.add_argument("--stocks", default=None, help="股票代碼（逗號分隔）")
     parser.add_argument("--dry-run", action="store_true", help="預覽不寫入")

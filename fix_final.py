@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-python fix_final.py 
+python fix_final.py
 最終修復 @stockID.csv — 修正 2344 high 異常、6122/6123/8936 重複日期、
 6412 成交量單位、並確保所有 @ 檔格式正確
 """
+
 import os
 import csv
-import json
 
 BASE_DIR = r"D:\workCS\TEST\2026\YuantaOneAPI_Python\YuantaOneAPI_Python"
 os.chdir(BASE_DIR)
@@ -39,9 +39,20 @@ print("=" * 60)
 print("@stockID.csv 最終修正")
 print("=" * 60)
 
-fieldnames = ["日期", "stock_id", "開盤價", "最高價", "最低價",
-              "收盤價", "成交股數", "成交金額", "成交筆數",
-              "total_in_volume", "total_out_volume", "estimated_day_volume"]
+fieldnames = [
+    "日期",
+    "stock_id",
+    "開盤價",
+    "最高價",
+    "最低價",
+    "收盤價",
+    "成交股數",
+    "成交金額",
+    "成交筆數",
+    "total_in_volume",
+    "total_out_volume",
+    "estimated_day_volume",
+]
 
 # 1. 修正 2344
 for stock_id, dates_fix in FIXES.items():
@@ -94,7 +105,10 @@ for stock_id in ["6122", "6123", "8936"]:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(filtered)
-        print(f"  {filename}: 移除 {removed} 筆錯誤 20260602 記錄, 保留 {len(filtered)} 筆")
+        print(
+            f"  {filename}: 移除 {removed} 筆錯誤 20260602 記錄, 保留 {
+                len(filtered)} 筆"
+        )
 
 # 3. 修正 6412 成交量
 filename = "@6412.csv"
@@ -131,21 +145,23 @@ print("\n" + "=" * 60)
 print("最終驗證")
 print("=" * 60)
 
-for stock_id in [ "2330",
-      "2317",
-      "2344",
-      "2610",
-      "2609",	  
-      "2356",	  
-      "6412",	  
-      "2354",	  
-      "9907",	  
-      "1522",
-      "6770",
-      "4958",
-      "2337",
-      "4536",
-      "4967"]:
+for stock_id in [
+    "2330",
+    "2317",
+    "2344",
+    "2610",
+    "2609",
+    "2356",
+    "6412",
+    "2354",
+    "9907",
+    "1522",
+    "6770",
+    "4958",
+    "2337",
+    "4536",
+    "4967",
+]:
     filename = f"@{stock_id}.csv"
     if not os.path.exists(filename):
         print(f"  {filename}: 不存在!")
