@@ -9,6 +9,7 @@
   - TWSE STOCK_DAY_ALL (收盤價)
   - TPEx 收盤行情 (收盤價 + 股本)
   - 0050/0056 成分股作為大型股參考
+  - valuation.json (5 檔估值帶: 特價/便宜/合理/昂貴/瘋狂)
 
 分類定義:
   - TWSE 大型: 市值前 50 名
@@ -17,6 +18,12 @@
   - OTC 大型: 市值前 50 名
   - OTC 中型: 市值 51-100 名
   - OTC 小型: 其餘
+
+估值框架（合併自 valuation.json）:
+  - 成長股: 共識EPS × 自身歷史PE中位數 × (1±聯準會調整)
+  - 循環股: 加權BPS × 自身歷史PBR中位數
+  - 5 檔價位帶（挑整幾碼）
+  - 前瞻指標是「假設」→ 用實際季 EPS 軌跡驗證
 
 用法:
   python update_market_cap.py              # 更新全部
@@ -335,7 +342,60 @@ def build_rankings():
             }
     rankings["OTC"] = otc_caps
 
+    # ---- 合併估值框架（5 檔價位帶）----
+    _merge_valuation(rankings)
+
     return rankings
+
+
+def _merge_valuation(rankings):
+    """將 valuation.json 的 5 檔估值帶合併進 rankings['stocks']。
+    估值理念：
+      - 成長股: 共識EPS × 自身歷史PE中位數 × (1±聯準會調整)
+      - 循環股: 加權BPS × 自身歷史PBR中位數
+      - 5 檔: 特價/便宜/合理/昂貴/瘋狂（挑整幾碼）
+      - 前瞻指標是「假設」→ 用實際季 EPS 軌跡驗證
+    """
+    val_file = os.path.join(BASE_DIR, "valuation.json")
+    if not os.path.exists(val_file):
+        print("[VALUATION] valuation.json 不存在，跳過合併")
+        return
+    try:
+        with open(val_file, encoding="utf-8") as f:
+            val_data = json.load(f)
+    except Exception as e:
+        print(f"[VALUATION] 讀取失敗: {e}")
+        return
+
+    val_stocks = val_data.get("stocks", {})
+    merged = 0
+    for code, v in val_stocks.items():
+        if v.get("status") == "no_config":
+            continue
+        if code not in rankings["stocks"]:
+            # 不在市值排名中（例如 OTC 未收錄），仍加入
+            rankings["stocks"][code] = {
+                "market": "TWSE",
+                "rank": None,
+                "tier": None,
+                "market_cap": None,
+                "name": v.get("name", ""),
+                "close": v.get("close"),
+            }
+        rankings["stocks"][code]["valuation"] = {
+            "mode": v.get("mode"),
+            "fair_raw": v.get("fair_raw"),
+            "bands": v.get("bands"),
+            "current_tier": v.get("current_tier"),
+            "eps": v.get("eps"),
+            "eps_source": v.get("eps_source"),
+            "pe_anchor": v.get("pe_anchor"),
+            "bps": v.get("bps"),
+            "pb_anchor": v.get("pb_anchor"),
+            "fed_adjustment": v.get("fed_adjustment"),
+        }
+        merged += 1
+    print(f"[VALUATION] 已合併 {merged} 檔估值帶")
 
 
 def main():
@@ -369,7 +429,7 @@ def main():
         for code in targets:
             info = rankings["stocks"].get(code, {})
             if info:
-                mcap_yi = info["market_cap"] / 1e8
+                mcap_yi = info["market_cap"] / 1e8 if info.get("market_cap") else 0
                 print(
                     f"  {code}: {
                         info['market']} #{
@@ -377,6 +437,18 @@ def main():
                         mcap_yi:.0f}億 tier={
                         info['tier']}"
                 )
+                # 顯示估值帶
+                val = info.get("valuation")
+                if val:
+                    bands = val.get("bands", {})
+                    cur = val.get("current_tier", "?")
+                    mode = "PE" if val.get("mode") == "growth" else "PBR"
+                    print(
+                        f"    估值[{mode}] 特價={bands.get('special')} "
+                        f"便宜={bands.get('cheap')} 合理={bands.get('fair')} "
+                        f"昂貴={bands.get('expensive')} 瘋狂={bands.get('crazy')}"
+                    )
+                    print(f"    目前: {cur} (收盤={info.get('close')})")
             else:
                 print(f"  {code}: 無資料")
 
