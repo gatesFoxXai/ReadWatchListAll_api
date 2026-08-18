@@ -1,8 +1,7 @@
 {
-  "updated": "2026-06-10",
-  "Valdate" : "2026Q1",
-  "stocks":
-  {
+  "updated": "2026-08-18",
+  "Valdate": "2026Q1",
+  "stocks": {
     "0062": {
       "name": "",
       "eps_ttm": null,
@@ -17,7 +16,7 @@
       "bps": 127.12,
       "eps_growth_pct": 23.6,
       "forward_eps": 15.5,
-	  "eps_quarters": [
+      "eps_quarters": [
         2.83,
         3.15,
         2.98,
@@ -31,14 +30,14 @@
       "bps": 227.2,
       "eps_growth_pct": 14.2,
       "forward_eps": 100,
-	  "eps_quarters": [
-	  27.25,
+      "eps_quarters": [
+        27.25,
         22.08,
         19.51,
         17.44,
         15.36
       ],
-      "note": BPS=227.2(26Q2)|TTM估86.28|26EPS=86.28 YoY=+67.87%|27fwdEPS=100"
+      "note": "BPS=227.2(26Q2)|TTM估86.28|26EPS=86.28 YoY=+67.87%|27fwdEPS=100"
     },
     "2344": {
       "name": "華邦電",
@@ -92,7 +91,7 @@
       "name": "上奇",
       "eps_ttm": 2.82,
       "bps": 24.98,
-      "eps_growth_pct": (1.18-0.7)/0.7*100,
+      "eps_growth_pct": 68.57,
       "forward_eps": 2.82,
       "note": "TTM=26Q1(0.7)+25Q4(0.74)+Q3(0.68)+Q2(0.7) | BPS=24.98 | 25EPS=2.73 YoY=-25.2% | 26Q1 EPS+18.6%YoY未衰退 | Google AI雲端代理+3D列印無人機+子公司Anthropic AI代理授權 | 營收衰退但獲利結構改善"
     },
@@ -138,11 +137,11 @@
     },
     "1522": {
       "name": "堤維西",
-      "eps_ttm": null,
-      "bps": null,
+      "eps_ttm": 0.96,
+      "bps": 27.92,
       "eps_growth_pct": null,
       "forward_eps": null,
-      "note": "new_stock_placeholder"
+      "note": "BPS=27.92(26Q2)|TTM=0.96(BWIBBU PE=29.38,PB=1.01)|待補forward_eps與growth"
     },
     "3293": {
       "name": "鈊象",
@@ -175,6 +174,46 @@
       "eps_growth_pct": null,
       "forward_eps": null,
       "note": "new_stock_placeholder"
+    },
+    "2337": {
+      "name": "旺宏",
+      "eps_ttm": 4.22,
+      "bps": 31.28,
+      "eps_growth_pct": null,
+      "forward_eps": null,
+      "note": "BPS=31.28(26Q2)|TTM=4.22(BWIBBU PE=30.69,PB=4.14)|待補forward_eps與growth"
+    },
+    "4536": {
+      "name": "拓凱",
+      "eps_ttm": 13.25,
+      "bps": 104.04,
+      "eps_growth_pct": null,
+      "forward_eps": null,
+      "note": "BPS=104.04(26Q2)|TTM=13.25(BWIBBU PE=12.64,PB=1.61)|待補forward_eps與growth"
+    },
+    "4958": {
+      "name": "臻鼎-KY",
+      "eps_ttm": 8.45,
+      "bps": 138.95,
+      "eps_growth_pct": null,
+      "forward_eps": null,
+      "note": "BPS=138.95(26Q2)|TTM=8.45(BWIBBU PE=59.53,PB=3.62)|待補forward_eps與growth"
+    },
+    "4967": {
+      "name": "十銓",
+      "eps_ttm": 67.39,
+      "bps": 131.09,
+      "eps_growth_pct": null,
+      "forward_eps": null,
+      "note": "BPS=131.09(26Q2)|TTM=67.39(BWIBBU PE=3.91,PB=2.01)|待補forward_eps與growth"
+    },
+    "6770": {
+      "name": "力積電",
+      "eps_ttm": 3.0,
+      "bps": 27.33,
+      "eps_growth_pct": null,
+      "forward_eps": null,
+      "note": "BPS=27.33(26Q2)|TTM=3.0(BWIBBU PE=24.87,PB=2.73)|待補forward_eps與growth"
     }
   }
 }
