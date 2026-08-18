@@ -913,21 +913,23 @@ def _tick_ceil(price: float) -> float:
 
 def _get_limit_prices(stock_id: str):
     """取得漲停價/跌停價（含 tick rounding）。
-    優先: stock_ref.json API 提供的 up_price/down_price（已考量除權息調整）
+    優先: stock_ref.json API 提供的 up_price/down_price（交易所權威值，已考量除權息調整）
     降級: 昨收價 ×1.10 / ×0.90（標準 10%）
     所有價格依台股檔位規則截斷（漲停）或進位（跌停）。
     回傳 (up_price, down_price) 或 (None, None)。"""
-    yst = _get_ref_price(stock_id)
     ref = _load_stock_ref()
     entry = ref.get(stock_id, {})
     api_up = _normalize_price(entry.get("up_price"))
     api_down = _normalize_price(entry.get("down_price"))
-    # 驗證 API 值合理性：漲停 > 昨收 > 跌停
-    if api_up is not None and api_down is not None and yst is not None:
-        if api_up > yst > api_down:
-            # 以 tick rounding 修正（API 值可能未考慮檔位，如 172.15→172.0）
-            return _tick_floor(api_up), _tick_ceil(api_down)
+    # 優先信任 API 提供的漲跌停價（交易所權威值）。
+    # 只要「漲停 > 跌停」即視為有效，不再強求「漲停 > 昨收 > 跌停」——
+    # 昨收價可能因除權息/資料延遲而不一致，過去此條件會誤拒有效的 API 漲跌停值，
+    # 導致降級成昨收 ±10% 估算（即「漲跌停沒被參考到」的 bug）。
+    if api_up is not None and api_down is not None and api_up > api_down:
+        # 以 tick rounding 修正（API 值可能未考慮檔位，如 172.15→172.0）
+        return _tick_floor(api_up), _tick_ceil(api_down)
     # 降級：直接用昨收計算 ±10% + tick rounding
+    yst = _get_ref_price(stock_id)
     if yst is not None and yst > 0:
         return _tick_floor(yst * 1.10), _tick_ceil(yst * 0.90)
     return None, None
