@@ -17,7 +17,7 @@ PEG 公式:
   python update_financials.py                # 更新全部
   python update_financials.py --stocks 2330  # 指定股票
 
-排程: 每季財報公布後（5/15, 8/14, 11/14, 3/31 前後）執行
+排程: 每周推估,每季財報公布（5/15, 8/14, 11/14, 3/31 前後）每周一執行
 """
 
 import json
